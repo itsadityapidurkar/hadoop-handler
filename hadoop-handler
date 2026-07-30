@@ -1,0 +1,572 @@
+#!/bin/bash
+
+# ==============================================================================
+#  Hadoop Handler — Single-Node Cluster Control Panel (Linux & macOS)
+#  Developer: Aditya Pidurkar (github.com/itsadityapidurkar)
+# ==============================================================================
+
+# Colors for terminal output
+RED='\033[0;31m'
+BRED='\033[1;31m'
+GREEN='\033[0;32m'
+BGREEN='\033[1;32m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BCYAN='\033[1;36m'
+YELLOW='\033[1;33m'
+GRAY='\033[90m'
+NC='\033[0m' # No Color
+
+DIVIDER="${GRAY}─────────────────────────────────────────────────────────────────${NC}"
+
+# Detect OS
+OS_NAME=$(uname -s)
+
+# Portable symlink resolution to find original install directory
+TARGET_FILE="${BASH_SOURCE[0]}"
+while [ -h "$TARGET_FILE" ]; do
+    DIR="$(dirname "$TARGET_FILE")"
+    TARGET_FILE="$(readlink "$TARGET_FILE")"
+    [[ "$TARGET_FILE" != /* ]] && TARGET_FILE="$DIR/$TARGET_FILE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$TARGET_FILE")" && pwd)"
+
+# Load environment variables dynamically within the script execution context
+load_env() {
+    if [ -z "$HADOOP_HOME" ]; then
+        if [ -d "/opt/hadoop" ]; then
+            export HADOOP_HOME="/opt/hadoop"
+        elif [ -d "/Users/Shared/hadoop" ]; then
+            export HADOOP_HOME="/Users/Shared/hadoop"
+        elif [ -d "$HOME/hadoop" ]; then
+            export HADOOP_HOME="$HOME/hadoop"
+        fi
+    fi
+    if [ -n "$HADOOP_HOME" ]; then
+        export HADOOP_CONF_DIR="$HADOOP_HOME/etc/hadoop"
+        export PATH="$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin"
+        # Detect Java Home if not set
+        if [ -z "$JAVA_HOME" ]; then
+            if [ "$OS_NAME" = "Linux" ]; then
+                if command -v java >/dev/null 2>&1; then
+                    export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+                fi
+            elif [ "$OS_NAME" = "Darwin" ]; then
+                if command -v java >/dev/null 2>&1; then
+                    export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+                fi
+            fi
+        fi
+    fi
+}
+
+pause_screen() {
+    echo -e "\n$DIVIDER"
+    echo -ne "  ${YELLOW}Press [Enter] to return to the main menu...${NC}"
+    read
+}
+
+# 1. Install Hadoop
+install_hadoop() {
+    clear
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Installing Apache Hadoop 3.4.2${NC}"
+    echo -e "$DIVIDER\n"
+    
+    # Check for Java 21
+    echo -e "  ${GRAY}[1/8]${NC} Checking for Java 21 compatibility..."
+    JAVA_VER=""
+    if command -v java >/dev/null 2>&1; then
+        JAVA_VER=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
+        echo -e "        Found Java: ${GREEN}${JAVA_VER}${NC}"
+    fi
+
+    if [[ "$JAVA_VER" == 21* ]]; then
+        echo -e "        Java 21 check: ${GREEN}Success${NC}"
+    else
+        echo -e "        Java 21 not found. Triggering automated installation..."
+        if [ "$OS_NAME" = "Linux" ]; then
+            if command -v apt-get >/dev/null 2>&1; then
+                echo -e "        Running: ${GRAY}sudo apt update && sudo apt install openjdk-21-jdk -y${NC}"
+                sudo apt-get update
+                sudo apt-get install openjdk-21-jdk -y
+            else
+                echo -e "  ${RED}[!] Package manager 'apt' not found. Please install Java 21 manually.${NC}"
+                return 1
+            fi
+        elif [ "$OS_NAME" = "Darwin" ]; then
+            if command -v brew >/dev/null 2>&1; then
+                echo -e "        Running: ${GRAY}brew install openjdk@21${NC}"
+                brew install openjdk@21
+                sudo ln -sfn /usr/local/opt/openjdk@21/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-21.jdk || true
+            else
+                echo -e "  ${RED}[!] Homebrew not found. Please install Homebrew or install Java 21 manually.${NC}"
+                return 1
+            fi
+        else
+            echo -e "  ${RED}[!] Unsupported operating system. Please install Java 21 manually.${NC}"
+            return 1
+        fi
+    fi
+
+    # Detect JAVA_HOME
+    if [ "$OS_NAME" = "Linux" ]; then
+        DETECTED_JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+    elif [ "$OS_NAME" = "Darwin" ]; then
+        DETECTED_JAVA_HOME=$(/usr/libexec/java_home -v 21)
+    fi
+    echo -e "        JAVA_HOME resolved to: ${CYAN}${DETECTED_JAVA_HOME}${NC}"
+
+    # Set Directories and Handle Spaces
+    HADOOP_TAR="hadoop-3.4.2.tar.gz"
+    DOWNLOAD_URL="https://archive.apache.org/dist/hadoop/common/hadoop-3.4.2/${HADOOP_TAR}"
+
+    if [ "$OS_NAME" = "Linux" ]; then
+        HADOOP_DEST="/opt/hadoop"
+        if [[ "$HOME" == *" "* ]]; then
+            echo -e "        ${YELLOW}[!] Warning: Home path contains spaces. Redirecting storage to /opt/...${NC}"
+            HADOOP_DATA_DIR="/opt/hadoopdata"
+            HADOOP_TMP_DIR="/opt/hadooptmp"
+        else
+            HADOOP_DATA_DIR="$HOME/hadoopdata"
+            HADOOP_TMP_DIR="$HOME/hadooptmp"
+        fi
+    else # macOS
+        if [[ "$HOME" == *" "* ]]; then
+            echo -e "        ${YELLOW}[!] Warning: Home path contains spaces. Redirecting installation to /Users/Shared/...${NC}"
+            HADOOP_DEST="/Users/Shared/hadoop"
+            HADOOP_DATA_DIR="/Users/Shared/hadoopdata"
+            HADOOP_TMP_DIR="/Users/Shared/hadooptmp"
+        else
+            HADOOP_DEST="$HOME/hadoop"
+            HADOOP_DATA_DIR="$HOME/hadoopdata"
+            HADOOP_TMP_DIR="$HOME/hadooptmp"
+        fi
+    fi
+
+    # Create Directories
+    echo -e "\n  ${GRAY}[2/8]${NC} Creating required system directories..."
+    mkdir -p ~/Downloads
+    if [ "$OS_NAME" = "Linux" ] && [[ "$HOME" == *" "* ]]; then
+        sudo mkdir -p "${HADOOP_DATA_DIR}/namenode"
+        sudo mkdir -p "${HADOOP_DATA_DIR}/datanode"
+        sudo mkdir -p "${HADOOP_TMP_DIR}"
+        sudo chown -R $USER:$USER "${HADOOP_DATA_DIR}" "${HADOOP_TMP_DIR}"
+    else
+        mkdir -p "${HADOOP_DATA_DIR}/namenode"
+        mkdir -p "${HADOOP_DATA_DIR}/datanode"
+        mkdir -p "${HADOOP_TMP_DIR}"
+    fi
+
+    # Download Hadoop 3.4.2
+    echo -e "\n  ${GRAY}[3/8]${NC} Retrieving Apache Hadoop 3.4.2 tarball..."
+    if [ -f "$HOME/Downloads/${HADOOP_TAR}" ]; then
+        echo -e "        ${HADOOP_TAR} already cached in ~/Downloads. Skipping download."
+    else
+        echo -e "        Downloading from official Apache archive..."
+        wget -P ~/Downloads "${DOWNLOAD_URL}"
+    fi
+
+    # Extract and Install
+    echo -e "\n  ${GRAY}[4/8]${NC} Extracting and relocating binaries..."
+    if [ "$OS_NAME" = "Linux" ]; then
+        if [ -d "${HADOOP_DEST}" ]; then
+            echo -e "        Removing existing directory at ${HADOOP_DEST}..."
+            sudo rm -rf "${HADOOP_DEST}"
+        fi
+        sudo tar -xzf ~/Downloads/${HADOOP_TAR} -C /opt
+        sudo mv /opt/hadoop-3.4.2 "${HADOOP_DEST}"
+        sudo chown -R $USER:$USER "${HADOOP_DEST}"
+    else # macOS
+        if [ -d "${HADOOP_DEST}" ]; then
+            echo -e "        Removing existing directory at ${HADOOP_DEST}..."
+            rm -rf "${HADOOP_DEST}"
+        fi
+        if [[ "$HOME" == *" "* ]]; then
+            tar -xzf ~/Downloads/${HADOOP_TAR} -C /Users/Shared
+            mv /Users/Shared/hadoop-3.4.2 "${HADOOP_DEST}"
+        else
+            tar -xzf ~/Downloads/${HADOOP_TAR} -C ~/
+            mv ~/hadoop-3.4.2 "${HADOOP_DEST}"
+        fi
+    fi
+    echo -e "        Extraction completed successfully."
+
+    # Configure SSH
+    echo -e "\n  ${GRAY}[5/8]${NC} Configuring passwordless SSH keys..."
+    if [ ! -f ~/.ssh/id_rsa ]; then
+        echo -e "        Generating new SSH keypair..."
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N ""
+    fi
+    cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+    chmod 700 ~/.ssh
+    chmod 600 ~/.ssh/authorized_keys
+
+    if [ "$OS_NAME" = "Darwin" ]; then
+        echo -e "        ${YELLOW}Note for macOS:${NC} Ensure 'Remote Login' is enabled in sharing settings."
+    fi
+
+    # Configure Environment Variables
+    echo -e "\n  ${GRAY}[6/8]${NC} Registering path variables in shell configuration..."
+    SHELL_CONFIG=""
+    if [[ "$SHELL" == */zsh ]]; then
+        SHELL_CONFIG="$HOME/.zshrc"
+    else
+        SHELL_CONFIG="$HOME/.bashrc"
+    fi
+
+    ENV_MARKER="# HADOOP ENV CONFIG"
+    if grep -q "$ENV_MARKER" "$SHELL_CONFIG" 2>/dev/null; then
+        echo -e "        Environment profile already configured in ${SHELL_CONFIG}."
+    else
+        cat << EOF >> "$SHELL_CONFIG"
+
+$ENV_MARKER
+export JAVA_HOME="${DETECTED_JAVA_HOME}"
+export HADOOP_HOME="${HADOOP_DEST}"
+export HADOOP_CONF_DIR="\${HADOOP_HOME}/etc/hadoop"
+export HADOOP_COMMON_HOME="\${HADOOP_HOME}"
+export HADOOP_HDFS_HOME="\${HADOOP_HOME}"
+export HADOOP_MAPRED_HOME="\${HADOOP_HOME}"
+export YARN_HOME="\${HADOOP_HOME}"
+export HADOOP_COMMON_LIB_NATIVE_DIR="\${HADOOP_HOME}/lib/native"
+export PATH="\$PATH:\$HADOOP_HOME/bin:\$HADOOP_HOME/sbin"
+EOF
+        echo -e "        Variables appended to ${SHELL_CONFIG}."
+    fi
+
+    # Configure XML Configuration Files
+    echo -e "\n  ${GRAY}[7/8]${NC} Building cluster configuration files..."
+    CONF_DIR="${HADOOP_DEST}/etc/hadoop"
+    LOCAL_CONF_DIR="${SCRIPT_DIR}/configs"
+
+    if [ -d "$LOCAL_CONF_DIR" ]; then
+        echo -e "        Loading XML templates from local configs directory..."
+        cp "${LOCAL_CONF_DIR}/core-site.xml" "${CONF_DIR}/"
+        cp "${LOCAL_CONF_DIR}/hdfs-site.xml" "${CONF_DIR}/"
+        cp "${LOCAL_CONF_DIR}/mapred-site.xml" "${CONF_DIR}/"
+        cp "${LOCAL_CONF_DIR}/yarn-site.xml" "${CONF_DIR}/"
+        cp "${LOCAL_CONF_DIR}/workers" "${CONF_DIR}/"
+        
+        # Replace template markers with space-free resolved paths
+        sed -i.bak "s|/home/YOUR_USERNAME/hadooptmp|${HADOOP_TMP_DIR}|g" "${CONF_DIR}/core-site.xml" || \
+        sed -i "" "s|/home/YOUR_USERNAME/hadooptmp|${HADOOP_TMP_DIR}|g" "${CONF_DIR}/core-site.xml"
+        
+        sed -i.bak "s|file:///home/YOUR_USERNAME/hadoopdata|file://${HADOOP_DATA_DIR}|g" "${CONF_DIR}/hdfs-site.xml" || \
+        sed -i "" "s|file:///home/YOUR_USERNAME/hadoopdata|file://${HADOOP_DATA_DIR}|g" "${CONF_DIR}/hdfs-site.xml"
+        
+        rm -f "${CONF_DIR}/core-site.xml.bak" "${CONF_DIR}/hdfs-site.xml.bak"
+    else
+        echo -e "        ${YELLOW}[!] Local templates missing. Generating fallback configurations...${NC}"
+        # core-site.xml
+        cat << EOF > "${CONF_DIR}/core-site.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://localhost:9000</value>
+    </property>
+    <property>
+        <name>hadoop.tmp.dir</name>
+        <value>${HADOOP_TMP_DIR}</value>
+    </property>
+</configuration>
+EOF
+
+        # hdfs-site.xml
+        cat << EOF > "${CONF_DIR}/hdfs-site.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <property>
+        <name>dfs.replication</name>
+        <value>1</value>
+    </property>
+    <property>
+        <name>dfs.namenode.name.dir</name>
+        <value>${HADOOP_DATA_DIR}/namenode</value>
+    </property>
+    <property>
+        <name>dfs.datanode.data.dir</name>
+        <value>${HADOOP_DATA_DIR}/datanode</value>
+    </property>
+</configuration>
+EOF
+
+        # mapred-site.xml
+        cat << EOF > "${CONF_DIR}/mapred-site.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <property>
+        <name>mapreduce.framework.name</name>
+        <value>yarn</value>
+    </property>
+    <property>
+        <name>mapreduce.application.classpath</name>
+        <value>\$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/*:\$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/lib/*</value>
+    </property>
+</configuration>
+EOF
+
+        # yarn-site.xml
+        cat << EOF > "${CONF_DIR}/yarn-site.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <property>
+        <name>yarn.nodemanager.aux-services</name>
+        <value>mapreduce_shuffle</value>
+    </property>
+    <property>
+        <name>yarn.nodemanager.env-whitelist</name>
+        <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,CLASSPATH_PREPEND_DISTCACHE,HADOOP_YARN_HOME,HADOOP_MAPRED_HOME</value>
+    </property>
+</configuration>
+EOF
+    fi
+
+    # Configure hadoop-env.sh
+    sed -i.bak "s|^# export JAVA_HOME=.*|export JAVA_HOME=${DETECTED_JAVA_HOME}|g" "${CONF_DIR}/hadoop-env.sh" || \
+    sed -i "" "s|^# export JAVA_HOME=.*|export JAVA_HOME=${DETECTED_JAVA_HOME}|g" "${CONF_DIR}/hadoop-env.sh"
+
+    # Format NameNode
+    echo -e "\n  ${GRAY}[8/8]${NC} Formatting HDFS NameNode system..."
+    "${HADOOP_DEST}/bin/hdfs" namenode -format -force
+
+    # Load variables for the current running script session
+    load_env
+
+    echo -e "\n  ${GREEN}[✓] Installation completed successfully!${NC}"
+    echo -e "      Please reload your shell profile to apply variables globally:"
+    echo -e "      ${YELLOW}source ${SHELL_CONFIG}${NC}"
+}
+
+# 2. Verify Hadoop Installation
+verify_hadoop() {
+    clear
+    load_env
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Verifying Hadoop System Status${NC}"
+    echo -e "$DIVIDER\n"
+    
+    if [ -z "$HADOOP_HOME" ] || [ ! -d "$HADOOP_HOME" ]; then
+        echo -e "  ${RED}[!] Error: Hadoop is not installed or HADOOP_HOME is not set correctly.${NC}"
+        return
+    fi
+    echo -e "  ${GRAY}HADOOP_HOME:${NC} ${GREEN}${HADOOP_HOME}${NC}"
+    
+    echo -ne "  ${GRAY}Hadoop binary:${NC} "
+    if command -v hadoop >/dev/null 2>&1; then
+        echo -e "${GREEN}Available${NC} ($(hadoop version | head -n 1))"
+    else
+        echo -e "${RED}Not found in PATH${NC} (Try sourcing shell profile)"
+    fi
+
+    echo -ne "  ${GRAY}Java version:${NC}  "
+    if command -v java >/dev/null 2>&1; then
+        echo -e "${GREEN}Available${NC} ($(java -version 2>&1 | head -n 1))"
+    else
+        echo -e "${RED}Not found${NC}"
+    fi
+
+    echo -e "\n  ${GRAY}Active Cluster Daemons (jps):${NC}"
+    echo -e "  $DIVIDER"
+    if command -v jps >/dev/null 2>&1; then
+        jps | sed 's/^/  /'
+    else
+        echo -e "  ${RED}'jps' command is not available. Please ensure OpenJDK is fully configured.${NC}"
+    fi
+}
+
+# 3. Start Hadoop Services
+start_services() {
+    clear
+    load_env
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Starting Hadoop Services (HDFS & YARN)$NC"
+    echo -e "$DIVIDER\n"
+    
+    if [ -z "$HADOOP_HOME" ] || [ ! -d "$HADOOP_HOME" ]; then
+        echo -e "  ${RED}[!] Error: Hadoop is not installed. Please run Option 1 first.${NC}"
+        return
+    fi
+
+    # Start HDFS (NameNode, DataNode, SecondaryNameNode)
+    echo -e "  ${GRAY}[1/2]${NC} Starting Distributed File System (HDFS)..."
+    if command -v start-dfs.sh >/dev/null 2>&1; then
+        start-dfs.sh
+    else
+        "${HADOOP_HOME}/sbin/start-dfs.sh"
+    fi
+
+    # Start YARN (ResourceManager, NodeManager)
+    echo -e "\n  ${GRAY}[2/2]${NC} Starting YARN Resource Negotiator..."
+    if command -v start-yarn.sh >/dev/null 2>&1; then
+        start-yarn.sh
+    else
+        "${HADOOP_HOME}/sbin/start-yarn.sh"
+    fi
+
+    echo -e "\n  ${GREEN}[✓] Active Hadoop daemons after startup:${NC}"
+    echo -e "  $DIVIDER"
+    if command -v jps >/dev/null 2>&1; then
+        jps | sed 's/^/  /'
+    fi
+}
+
+# 4. Stop Hadoop Services
+stop_services() {
+    clear
+    load_env
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Stopping Hadoop Services (YARN & HDFS)$NC"
+    echo -e "$DIVIDER\n"
+    
+    if [ -z "$HADOOP_HOME" ] || [ ! -d "$HADOOP_HOME" ]; then
+        echo -e "  ${RED}[!] Error: Hadoop is not installed.${NC}"
+        return
+    fi
+
+    # Stop YARN
+    echo -e "  ${GRAY}[1/2]${NC} Stopping YARN Resource Manager & Nodes..."
+    if command -v stop-yarn.sh >/dev/null 2>&1; then
+        stop-yarn.sh
+    else
+        "${HADOOP_HOME}/sbin/stop-yarn.sh"
+    fi
+
+    # Stop HDFS
+    echo -e "\n  ${GRAY}[2/2]${NC} Stopping Distributed File System (HDFS)..."
+    if command -v stop-dfs.sh >/dev/null 2>&1; then
+        stop-dfs.sh
+    else
+        "${HADOOP_HOME}/sbin/stop-dfs.sh"
+    fi
+
+    echo -e "\n  ${GREEN}[✓] Remaining active daemons:${NC}"
+    echo -e "  $DIVIDER"
+    if command -v jps >/dev/null 2>&1; then
+        jps | sed 's/^/  /'
+    fi
+}
+
+# 5. Delete Hadoop Completely
+delete_hadoop() {
+    clear
+    echo -e "$DIVIDER"
+    echo -e "  ${BRED}ACTION: Completely Uninstalling Hadoop${NC}"
+    echo -e "$DIVIDER\n"
+    
+    echo -e "  ${RED}[!] WARNING: This will permanently delete your Hadoop installation,${NC}"
+    echo -e "  ${RED}    configuration files, HDFS directories, and path profiles.${NC}\n"
+    read -p "  Are you sure you want to proceed? (y/N): " confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        load_env
+        
+        # Stop services first
+        stop_services >/dev/null 2>&1 || true
+        
+        echo -e "\n  ${GRAY}[1/3]${NC} Deleting binaries and directories..."
+        if [ -d "$HADOOP_HOME" ]; then
+            if [ "$OS_NAME" = "Linux" ]; then
+                sudo rm -rf "$HADOOP_HOME"
+            else
+                rm -rf "$HADOOP_HOME"
+            fi
+        fi
+        
+        echo -e "  ${GRAY}[2/3]${NC} Deleting local HDFS storage & tmp blocks..."
+        rm -rf ~/hadoopdata
+        rm -rf ~/hadooptmp
+        rm -rf /Users/Shared/hadoopdata 2>/dev/null || true
+        rm -rf /Users/Shared/hadooptmp 2>/dev/null || true
+        
+        # Remove environment variables from shell profile
+        echo -e "  ${GRAY}[3/3]${NC} Cleaning system environment profile..."
+        SHELL_CONFIG=""
+        if [[ "$SHELL" == */zsh ]]; then
+            SHELL_CONFIG="$HOME/.zshrc"
+        else
+            SHELL_CONFIG="$HOME/.bashrc"
+        fi
+        
+        if [ -f "$SHELL_CONFIG" ]; then
+            sed -i.bak '/# HADOOP ENV CONFIG/,/export PATH=.*sbin/d' "$SHELL_CONFIG" || \
+            sed -i "" '/# HADOOP ENV CONFIG/,/export PATH=.*sbin/d' "$SHELL_CONFIG"
+            rm -f "${SHELL_CONFIG}.bak"
+        fi
+        
+        # Clear local environment variables
+        export HADOOP_HOME=""
+        export HADOOP_CONF_DIR=""
+        
+        echo -e "\n  ${GREEN}[✓] Uninstall completed. Please reload your shell profile:${NC}"
+        echo -e "      ${YELLOW}source ${SHELL_CONFIG}${NC}"
+    else
+        echo -e "      Uninstall cancelled."
+    fi
+}
+
+show_menu() {
+    echo -e "${CYAN}"
+    cat << "EOF"
+█ █  ███  ██   ███  ███  ███    █ █  ███  ██ █  ██   █    ███  ███
+███  █ █  █ █  █ █  █ █  ███    ███  █ █  █ ██  █ █  █    ██   ███
+█ █  █ █  ██   ███  ███  █      █ █  █ █  █  █  ██   ███  ███  █ █
+EOF
+    echo -e "${NC}"
+    echo -e "  ${GRAY}Developer:${NC} ${BCYAN}Aditya Pidurkar${NC} (${CYAN}github.com/itsadityapidurkar${NC})"
+    echo -e "  ${GRAY}Scope:${NC}     Apache Hadoop 3.4.2 Single-Node Control Center"
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}1.${NC} Install Hadoop"
+    echo -e "  ${BCYAN}2.${NC} Verify Hadoop Installation"
+    echo -e "  ${BCYAN}3.${NC} Start Hadoop Services (HDFS & YARN)"
+    echo -e "  ${BCYAN}4.${NC} Stop Hadoop Services"
+    echo -e "  ${BCYAN}5.${NC} Delete Hadoop Completely"
+    echo -e "  ${BCYAN}6.${NC} Exit"
+    echo -e "$DIVIDER"
+}
+
+# Interactive Menu Loop
+load_env
+
+while true; do
+    clear
+    show_menu
+    read -p "  Select an option [1-6]: " choice
+    
+    case $choice in
+        1)
+            install_hadoop
+            pause_screen
+            ;;
+        2)
+            verify_hadoop
+            pause_screen
+            ;;
+        3)
+            start_services
+            pause_screen
+            ;;
+        4)
+            stop_services
+            pause_screen
+            ;;
+        5)
+            delete_hadoop
+            pause_screen
+            ;;
+        6)
+            clear
+            echo -e "\n  Exiting Hadoop Handler. Goodbye!"
+            exit 0
+            ;;
+        *)
+            echo -e "  ${RED}[!] Invalid choice. Please select [1-6].${NC}"
+            sleep 1.5
+            ;;
+    esac
+done
