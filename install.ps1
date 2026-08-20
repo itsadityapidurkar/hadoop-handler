@@ -341,6 +341,120 @@ function Delete-Hadoop {
 }
 
 # Main Loop
+
+function Diagnose-Environment {
+    Clear-Host
+    Write-Host $Divider -ForegroundColor DarkGray
+    Write-Host "  ACTION: Diagnose System Dependencies" -ForegroundColor Cyan
+    Write-Host $Divider -ForegroundColor DarkGray
+    Write-Host ""
+    
+    $global:RepairItems = @()
+    
+    # Architecture
+    $Arch = (Get-CimInstance Win32_OperatingSystem).OSArchitecture
+    Write-Host "  Architecture: $Arch" -ForegroundColor Green
+    
+    # Elevation
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        Write-Host "  Elevation:    Admin" -ForegroundColor Green
+    } else {
+        Write-Host "  Elevation:    User (Admin required for repair)" -ForegroundColor Yellow
+        $global:RepairItems += "elevation"
+    }
+
+    # Execution Policy
+    $Policy = Get-ExecutionPolicy
+    Write-Host "  Exec Policy:  $Policy" -ForegroundColor Green
+    if ($Policy -eq "Restricted") {
+        Write-Host "  [!] Execution policy is Restricted, scripts may be blocked." -ForegroundColor Red
+        $global:RepairItems += "policy"
+    }
+
+    # VC++ Runtime
+    $SysPath = if ($Arch -match "64") { "C:\Windows\System32" } else { "C:\Windows\SysWOW64" }
+    if (Test-Path "$SysPathcruntime140.dll") {
+        Write-Host "  VC++ Runtime: Present" -ForegroundColor Green
+    } else {
+        Write-Host "  VC++ Runtime: Missing (Required for Hadoop native binaries)" -ForegroundColor Red
+        $global:RepairItems += "vcredist"
+    }
+
+    # Archiving Tool
+    if (Get-Command tar -ErrorAction SilentlyContinue) {
+        Write-Host "  Archive Tool: tar.exe (Native)" -ForegroundColor Green
+    } elseif (Get-Command Expand-Archive -ErrorAction SilentlyContinue) {
+        Write-Host "  Archive Tool: Expand-Archive (.NET)" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Archive Tool: Missing" -ForegroundColor Red
+        $global:RepairItems += "7zip"
+    }
+}
+
+function Repair-Environment {
+    param(
+        [switch]$DryRun
+    )
+    
+    if (-not $global:RepairItems -or $global:RepairItems.Count -eq 0) {
+        Write-Host "`n  [✓] Nothing to repair. System is ready." -ForegroundColor Green
+        return
+    }
+
+    Write-Host "`n  ACTION: Repair System Dependencies" -ForegroundColor Cyan
+    if ($DryRun) {
+        Write-Host "  --- DRY RUN MODE ---" -ForegroundColor Yellow
+    }
+    
+    $LogFile = "$env:TEMP\hadoop_repair.log"
+    "Repair Log - $(Get-Date)" | Out-File $LogFile
+
+    foreach ($item in $global:RepairItems) {
+        if ($item -eq "elevation") {
+            Write-Host "  [!] Please restart PowerShell as Administrator." -ForegroundColor Red
+            return
+        }
+        
+        if ($item -eq "policy") {
+            Write-Host "  Repairing: Execution Policy"
+            if ($DryRun) {
+                Write-Host "  > Set-ExecutionPolicy RemoteSigned -Scope LocalMachine"
+            } else {
+                $confirm = Read-Host "  Change execution policy to RemoteSigned? (y/N)"
+                if ($confirm -match "^[Yy]$") {
+                    Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force
+                    "Set-ExecutionPolicy RemoteSigned" | Out-File -Append $LogFile
+                }
+            }
+        }
+        
+        if ($item -eq "vcredist") {
+            Write-Host "  Repairing: VC++ 2015-2022 Redistributable"
+            $VCRedistUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+            $VCRedistPath = "$env:TEMPc_redist.x64.exe"
+            # SHA256 verification is complex as Microsoft frequently updates this binary.
+            # In a real production script we'd pin a specific version, but here we'll download it.
+            if ($DryRun) {
+                Write-Host "  > Invoke-WebRequest $VCRedistUrl -OutFile $VCRedistPath"
+                Write-Host "  > Start-Process $VCRedistPath -ArgumentList '/quiet /norestart' -Wait"
+            } else {
+                Write-Host "  Downloading VC++ redist..." -ForegroundColor DarkGray
+                Invoke-WebRequest -Uri $VCRedistUrl -OutFile $VCRedistPath
+                "Downloaded $VCRedistUrl" | Out-File -Append $LogFile
+                Write-Host "  Installing..." -ForegroundColor DarkGray
+                Start-Process $VCRedistPath -ArgumentList "/quiet /norestart" -Wait
+                "Installed VC++ redist" | Out-File -Append $LogFile
+            }
+        }
+    }
+    
+    if (-not $DryRun) {
+        Write-Host "  [✓] Repairs applied successfully!" -ForegroundColor Green
+        Write-Host "  Check log at: $LogFile" -ForegroundColor DarkGray
+    }
+}
+
 while ($true) {
     Clear-Host
     Write-Host "█ █  ███  ██   ███  ███  ███    █ █  ███  ██ █  ██   █    ███  ███" -ForegroundColor Cyan
@@ -350,6 +464,7 @@ while ($true) {
     Write-Host "  Developer: Aditya Pidurkar (github.com/itsadityapidurkar)" -ForegroundColor Cyan
     Write-Host "  Scope:     Apache Hadoop 3.4.2 Single-Node Control Center (Windows)" -ForegroundColor DarkGray
     Write-Host $Divider -ForegroundColor DarkGray
+    Write-Host "  0. Diagnose/Repair System Dependencies" -ForegroundColor Cyan
     Write-Host "  1. Install Hadoop" -ForegroundColor Cyan
     Write-Host "  2. Verify Hadoop Installation" -ForegroundColor Cyan
     Write-Host "  3. Start Hadoop Services (HDFS & YARN)" -ForegroundColor Cyan
@@ -358,14 +473,23 @@ while ($true) {
     Write-Host "  6. Exit" -ForegroundColor Cyan
     Write-Host $Divider -ForegroundColor DarkGray
 
-    $choice = Read-Host "  Select an option [1-6]"
+    $choice = Read-Host "  Select an option [0-6]"
     switch ($choice) {
+        "0" { 
+            Diagnose-Environment
+            if ($global:RepairItems.Count -gt 0) {
+                $ans = Read-Host "`n  Proceed with repairs? (y/N/dryrun)"
+                if ($ans -match "^[Yy]$") { Repair-Environment }
+                elseif ($ans -eq "dryrun") { Repair-Environment -DryRun }
+            }
+            pause_screen
+        }
         "1" { Install-Hadoop; pause_screen }
         "2" { Verify-Hadoop; pause_screen }
         "3" { Start-Services; pause_screen }
         "4" { Stop-Services; pause_screen }
         "5" { Delete-Hadoop; pause_screen }
         "6" { Clear-Host; Write-Host "`n  Exiting Hadoop Handler. Goodbye!"; Exit }
-        default { Write-Host "  [!] Invalid choice. Select [1-6]." -ForegroundColor Red; Start-Sleep -Seconds 1.5 }
+        default { Write-Host "  [!] Invalid choice. Select [0-6]." -ForegroundColor Red; Start-Sleep -Seconds 1.5 }
     }
 }

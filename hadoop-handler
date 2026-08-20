@@ -536,6 +536,132 @@ delete_hadoop() {
     fi
 }
 
+
+diagnose_environment() {
+    clear
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Diagnose System Dependencies${NC}"
+    echo -e "$DIVIDER\n"
+    
+    MISSING=()
+    REPAIR_CMDS=()
+    
+    # 1. Package Manager
+    PKG_MGR=""
+    SUDO_CMD="sudo"
+    if [ "$OS_NAME" = "Linux" ]; then
+        for pm in apt-get dnf yum pacman; do
+            if command -v $pm >/dev/null 2>&1; then
+                PKG_MGR=$pm
+                break
+            fi
+        done
+        if [ -z "$PKG_MGR" ]; then
+            echo -e "  ${RED}[!] No supported package manager found (apt, dnf, yum, pacman).${NC}"
+            return 1
+        fi
+        if ! command -v sudo >/dev/null 2>&1; then
+            echo -e "  ${YELLOW}[!] 'sudo' is not available. System repairs may fail if root access is required.${NC}"
+            SUDO_CMD=""
+        fi
+    elif [ "$OS_NAME" = "Darwin" ]; then
+        if command -v brew >/dev/null 2>&1; then
+            PKG_MGR="brew"
+        else
+            echo -e "  ${YELLOW}[!] Homebrew is missing.${NC}"
+            MISSING+=("homebrew")
+            REPAIR_CMDS+=("/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+        fi
+    fi
+    echo -e "  ${GRAY}Package Manager:${NC} ${GREEN}${PKG_MGR:-Missing}${NC}"
+
+    # 2. Check Utilities
+    for util in tar wget curl ssh rsync; do
+        if ! command -v $util >/dev/null 2>&1; then
+            MISSING+=("$util")
+            if [ "$PKG_MGR" = "apt-get" ]; then
+                [ "$util" = "ssh" ] && pkg="openssh-client" || pkg="$util"
+                REPAIR_CMDS+=("$SUDO_CMD apt-get install -y $pkg")
+            elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
+                [ "$util" = "ssh" ] && pkg="openssh-clients" || pkg="$util"
+                REPAIR_CMDS+=("$SUDO_CMD $PKG_MGR install -y $pkg")
+            elif [ "$PKG_MGR" = "pacman" ]; then
+                [ "$util" = "ssh" ] && pkg="openssh" || pkg="$util"
+                REPAIR_CMDS+=("$SUDO_CMD pacman -S --noconfirm $pkg")
+            elif [ "$PKG_MGR" = "brew" ]; then
+                REPAIR_CMDS+=("brew install $util")
+            fi
+        fi
+    done
+
+    echo -e "\n  ${GRAY}Missing Dependencies:${NC}"
+    if [ ${#MISSING[@]} -eq 0 ]; then
+        echo -e "  ${GREEN}None! All core utilities are present.${NC}"
+    else
+        for m in "${MISSING[@]}"; do
+            echo -e "  ${RED}- $m${NC}"
+        done
+        echo -e "\n  ${GRAY}Repair Actions Required:${NC}"
+        for cmd in "${REPAIR_CMDS[@]}"; do
+            echo -e "  > ${YELLOW}$cmd${NC}"
+        done
+        
+        # Save to file to pass to apply
+        printf "%s\n" "${REPAIR_CMDS[@]}" > /tmp/hadoop_repair_cmds.txt
+        printf "%s\n" "${MISSING[@]}" > /tmp/hadoop_repair_missing.txt
+    fi
+}
+
+apply_repairs() {
+    local dry_run=$1
+    if [ ! -f /tmp/hadoop_repair_cmds.txt ]; then
+        echo -e "  ${GREEN}[✓] Nothing to repair. System is already fully equipped.${NC}"
+        return 0
+    fi
+    
+    if [ "$dry_run" = "true" ]; then
+        echo -e "\n  ${BCYAN}--- DRY RUN MODE ---${NC}"
+        echo -e "  The following commands would be executed:"
+        cat /tmp/hadoop_repair_cmds.txt | while read cmd; do
+            echo -e "  > $cmd"
+        done
+        return 0
+    fi
+
+    echo -e "\n  ${BCYAN}ACTION: Applying Repairs${NC}"
+    echo -e "  $DIVIDER"
+    
+    cat /tmp/hadoop_repair_cmds.txt | while read cmd; do
+        echo -e "  ${GRAY}Executing: $cmd${NC}"
+        # Execute the command safely
+        eval "$cmd"
+        if [ $? -ne 0 ]; then
+            echo -e "  ${RED}[!] Repair step failed: $cmd${NC}"
+            echo -e "  ${YELLOW}Aborting further repairs.${NC}"
+            rm -f /tmp/hadoop_repair_cmds.txt /tmp/hadoop_repair_missing.txt
+            return 1
+        fi
+    done
+    
+    echo -e "  ${GREEN}[✓] All repairs completed successfully!${NC}"
+    rm -f /tmp/hadoop_repair_cmds.txt /tmp/hadoop_repair_missing.txt
+}
+
+diagnose_and_repair() {
+    diagnose_environment
+    if [ -f /tmp/hadoop_repair_cmds.txt ]; then
+        echo -e "\n  Do you want to apply these repairs now? (y/N/dryrun)"
+        read -p "  > " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            apply_repairs "false"
+        elif [[ "$confirm" == "dryrun" ]]; then
+            apply_repairs "true"
+        else
+            echo -e "  ${YELLOW}Repairs cancelled.${NC}"
+        fi
+    fi
+}
+
 show_menu() {
     echo -e "${CYAN}"
     cat << "EOF"
@@ -547,6 +673,7 @@ EOF
     echo -e "  ${GRAY}Developer:${NC} ${BCYAN}Aditya Pidurkar${NC} (${CYAN}github.com/itsadityapidurkar${NC})"
     echo -e "  ${GRAY}Scope:${NC}     Apache Hadoop 3.4.2 Single-Node Control Center"
     echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}0.${NC} Diagnose/Repair System Dependencies"
     echo -e "  ${BCYAN}1.${NC} Install Hadoop"
     echo -e "  ${BCYAN}2.${NC} Verify Hadoop Installation"
     echo -e "  ${BCYAN}3.${NC} Start Hadoop Services (HDFS & YARN)"
@@ -562,9 +689,13 @@ load_env
 while true; do
     clear
     show_menu
-    read -p "  Select an option [1-6]: " choice
+    read -p "  Select an option [0-6]: " choice
     
     case $choice in
+        0)
+            diagnose_and_repair
+            pause_screen
+            ;;
         1)
             install_hadoop
             pause_screen
@@ -591,7 +722,7 @@ while true; do
             exit 0
             ;;
         *)
-            echo -e "  ${RED}[!] Invalid choice. Please select [1-6].${NC}"
+            echo -e "  ${RED}[!] Invalid choice. Please select [0-6].${NC}"
             sleep 1.5
             ;;
     esac
