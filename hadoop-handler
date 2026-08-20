@@ -89,15 +89,24 @@ install_hadoop() {
             if command -v apt-get >/dev/null 2>&1; then
                 echo -e "        Running: ${GRAY}sudo apt update && sudo apt install openjdk-21-jdk -y${NC}"
                 sudo apt-get update
-                sudo apt-get install openjdk-21-jdk -y
+                sudo apt-get install openjdk-21-jdk -y || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
+            elif command -v dnf >/dev/null 2>&1; then
+                echo -e "        Running: ${GRAY}sudo dnf install java-21-openjdk-devel -y${NC}"
+                sudo dnf install java-21-openjdk-devel -y || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
+            elif command -v yum >/dev/null 2>&1; then
+                echo -e "        Running: ${GRAY}sudo yum install java-21-openjdk-devel -y${NC}"
+                sudo yum install java-21-openjdk-devel -y || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
+            elif command -v pacman >/dev/null 2>&1; then
+                echo -e "        Running: ${GRAY}sudo pacman -S jre21-openjdk jdk21-openjdk --noconfirm${NC}"
+                sudo pacman -S jre21-openjdk jdk21-openjdk --noconfirm || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
             else
-                echo -e "  ${RED}[!] Package manager 'apt' not found. Please install Java 21 manually.${NC}"
+                echo -e "  ${RED}[!] Supported package manager not found. Please install Java 21 manually.${NC}"
                 return 1
             fi
         elif [ "$OS_NAME" = "Darwin" ]; then
             if command -v brew >/dev/null 2>&1; then
                 echo -e "        Running: ${GRAY}brew install openjdk@21${NC}"
-                brew install openjdk@21
+                brew install openjdk@21 || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
                 sudo ln -sfn /usr/local/opt/openjdk@21/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-21.jdk || true
             else
                 echo -e "  ${RED}[!] Homebrew not found. Please install Homebrew or install Java 21 manually.${NC}"
@@ -164,7 +173,14 @@ install_hadoop() {
         echo -e "        ${HADOOP_TAR} already cached in ~/Downloads. Skipping download."
     else
         echo -e "        Downloading from official Apache archive..."
-        wget -P ~/Downloads "${DOWNLOAD_URL}"
+        if command -v wget >/dev/null 2>&1; then
+            wget -P "$HOME/Downloads" "${DOWNLOAD_URL}" || { echo -e "  ${RED}[!] Download failed.${NC}"; rm -f "$HOME/Downloads/${HADOOP_TAR}"; return 1; }
+        elif command -v curl >/dev/null 2>&1; then
+            curl -L -o "$HOME/Downloads/${HADOOP_TAR}" "${DOWNLOAD_URL}" || { echo -e "  ${RED}[!] Download failed.${NC}"; rm -f "$HOME/Downloads/${HADOOP_TAR}"; return 1; }
+        else
+            echo -e "  ${RED}[!] Neither 'wget' nor 'curl' found. Please install one of them to proceed.${NC}"
+            return 1
+        fi
     fi
 
     # Extract and Install
@@ -174,7 +190,7 @@ install_hadoop() {
             echo -e "        Removing existing directory at ${HADOOP_DEST}..."
             sudo rm -rf "${HADOOP_DEST}"
         fi
-        sudo tar -xzf ~/Downloads/${HADOOP_TAR} -C /opt
+        sudo tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C /opt || { echo -e "  ${RED}[!] Extraction failed. Tarball may be corrupted.${NC}"; return 1; }
         sudo mv /opt/hadoop-3.4.2 "${HADOOP_DEST}"
         sudo chown -R $USER:$USER "${HADOOP_DEST}"
     else # macOS
@@ -183,11 +199,11 @@ install_hadoop() {
             rm -rf "${HADOOP_DEST}"
         fi
         if [[ "$HOME" == *" "* ]]; then
-            tar -xzf ~/Downloads/${HADOOP_TAR} -C /Users/Shared
+            tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C /Users/Shared || { echo -e "  ${RED}[!] Extraction failed. Tarball may be corrupted.${NC}"; return 1; }
             mv /Users/Shared/hadoop-3.4.2 "${HADOOP_DEST}"
         else
-            tar -xzf ~/Downloads/${HADOOP_TAR} -C ~/
-            mv ~/hadoop-3.4.2 "${HADOOP_DEST}"
+            tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C "$HOME/" || { echo -e "  ${RED}[!] Extraction failed. Tarball may be corrupted.${NC}"; return 1; }
+            mv "$HOME/hadoop-3.4.2" "${HADOOP_DEST}"
         fi
     fi
     echo -e "        Extraction completed successfully."
@@ -196,11 +212,21 @@ install_hadoop() {
     echo -e "\n  ${GRAY}[5/8]${NC} Configuring passwordless SSH keys..."
     if [ ! -f ~/.ssh/id_rsa ]; then
         echo -e "        Generating new SSH keypair..."
-        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N ""
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" || { echo -e "  ${RED}[!] SSH key generation failed.${NC}"; return 1; }
     fi
-    cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+    
+    # Avoid duplicating authorized_keys entry
+    touch ~/.ssh/authorized_keys
+    if ! grep -q "$(cat ~/.ssh/id_rsa.pub)" ~/.ssh/authorized_keys 2>/dev/null; then
+        cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+    fi
     chmod 700 ~/.ssh
     chmod 600 ~/.ssh/authorized_keys
+    
+    # Add localhost to known_hosts to prevent prompts
+    if ! ssh-keygen -F localhost >/dev/null 2>&1; then
+        ssh-keyscan -H localhost >> ~/.ssh/known_hosts 2>/dev/null
+    fi
 
     if [ "$OS_NAME" = "Darwin" ]; then
         echo -e "        ${YELLOW}Note for macOS:${NC} Ensure 'Remote Login' is enabled in sharing settings."

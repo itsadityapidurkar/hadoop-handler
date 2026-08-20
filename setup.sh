@@ -18,6 +18,11 @@ echo -e "         Hadoop Handler Setup Installer            "
 echo -e "        Developer: Aditya Pidurkar (github.com/itsadityapidurkar)    "
 echo -e "${BLUE}===================================================${NC}"
 
+if [ -z "$HOME" ]; then
+    echo -e "${RED}[!] Error: HOME environment variable is not set.${NC}"
+    exit 1
+fi
+
 # Get directory where setup.sh is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

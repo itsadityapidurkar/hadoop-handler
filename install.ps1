@@ -16,6 +16,9 @@ $JavaDest = "C:\java\jdk-21"
 $CacheDir = "C:\hadoop_cache"
 $Divider = "─────────────────────────────────────────────────────────────────"
 
+$ErrorActionPreference = 'Continue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 function load_env {
     # Check environment variables
     if (-not $env:JAVA_HOME) {
@@ -44,7 +47,7 @@ function Install-Hadoop {
     Write-Host ""
 
     # Release any active file locks from running daemons or previous failed runs
-    Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name java -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*$JavaDest*" } | Stop-Process -Force
 
     # Create directories
     Write-Host "  [1/8] Creating required system directories..." -ForegroundColor DarkGray
@@ -74,7 +77,11 @@ function Install-Hadoop {
         }
         if (Test-Path $JavaDest) { cmd.exe /c "rmdir /s /q `"$JavaDest`"" }
         Write-Host "        Extracting OpenJDK 21 to C:\java..."
-        Expand-Archive -Path $JavaZip -DestinationPath "C:\java"
+        if (Get-Command tar -ErrorAction SilentlyContinue) {
+            tar -xf $JavaZip -C "C:\java"
+        } else {
+            Expand-Archive -Path $JavaZip -DestinationPath "C:\java"
+        }
         $extractedDir = Get-ChildItem "C:\java" | Where-Object { $_.Name -like "*jdk-21*" -and $_.PSIsContainer }
         if ($extractedDir) {
             Rename-Item -Path $extractedDir.FullName -NewName "jdk-21"
@@ -130,8 +137,12 @@ function Install-Hadoop {
     $SystemPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     if ($SystemPath -notlike "*%HADOOP_HOME%\bin*") {
         $NewPath = "$SystemPath;%HADOOP_HOME%\bin;%JAVA_HOME%\bin"
-        [Environment]::SetEnvironmentVariable("Path", $NewPath, "Machine")
-        Write-Host "        Added HADOOP_HOME\bin and JAVA_HOME\bin to PATH." -ForegroundColor Green
+        if ($NewPath.Length -lt 2048) {
+            [Environment]::SetEnvironmentVariable("Path", $NewPath, "Machine")
+            Write-Host "        Added HADOOP_HOME\bin and JAVA_HOME\bin to PATH." -ForegroundColor Green
+        } else {
+            Write-Host "        [!] System PATH is too long. Please manually add %HADOOP_HOME%\bin and %JAVA_HOME%\bin." -ForegroundColor Yellow
+        }
     }
 
     # Configuration Files
@@ -306,7 +317,7 @@ function Delete-Hadoop {
     if ($confirm -eq "y" -or $confirm -eq "Y") {
         Write-Host "`n  [1/3] Terminating any running daemons..." -ForegroundColor DarkGray
         Stop-Services > $null 2>&1
-        Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force
+        Get-Process -Name java -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*$JavaDest*" } | Stop-Process -Force
 
         Write-Host "  [2/3] Deleting Hadoop folders..." -ForegroundColor DarkGray
         if (Test-Path $HadoopDest) { cmd.exe /c "rmdir /s /q `"$HadoopDest`"" }
