@@ -40,7 +40,7 @@ hadoop-handler
 
 ### Menu Features
 0. **Diagnose/Repair System Dependencies:** Automatically detects missing utilities (tar, curl, Visual C++, etc.) and safely installs them using your native package manager.
-1. **Install Hadoop:** Auto-installs Java 21, downloads and extracts Hadoop 3.4.2, generates passwordless SSH keys, configures paths, and formats the NameNode.
+1. **Install Hadoop:** Auto-installs Java 21, securely downloads and extracts Hadoop 3.4.2 (with resume capabilities), generates passwordless SSH keys, configures firewall ports, formats the NameNode, and configures paths. Installations are fully idempotent (re-running will not wipe your HDFS data blocks).
 2. **Verify Hadoop Installation:** Checks environment variables, checks commands (`hadoop`, `java`), and lists active daemons.
 3. **Start Hadoop Services:** Automatically starts HDFS (dfs) and YARN services.
 4. **Stop Hadoop Services:** Stops YARN resources and HDFS services.

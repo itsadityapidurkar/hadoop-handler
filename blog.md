@@ -34,6 +34,10 @@ You remain in total control: it only installs the dependencies when you explicit
 ### 2. Painless Cross-Platform Installation
 Hadoop Handler takes the pain out of path resolution. It dynamically detects your OS, finds where your Java 21 is installed, generates passwordless SSH keys (on Unix systems), correctly patches your `.bashrc` or `.zshrc`, and injects the correct configuration files (like `core-site.xml` and `hdfs-site.xml`). 
 
+**Idempotent & Safe**: If your internet drops, running the installer again seamlessly resumes the download. If you run the installer on an existing cluster, the tool detects it and avoids reformatting the NameNode, keeping your HDFS data blocks perfectly safe!
+
+**Automated Firewalling**: Hadoop requires specific ports to function. The installer now detects if you're running `ufw`, `firewalld`, or `Windows Defender Firewall` and offers to seamlessly punch holes for the NameNode, HDFS, and YARN UI.
+
 ### 3. Integrated Start, Stop, and Verification
 Forget manually navigating to `/sbin` to run startup scripts. The tool features built-in verification checks. A single menu option allows you to:
 - Verify that your paths are set properly.
