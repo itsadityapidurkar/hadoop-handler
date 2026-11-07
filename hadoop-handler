@@ -1193,12 +1193,27 @@ MENU_OPTIONS=(
 
 MENU_CHOICE=""
 
-# Arrow-Key Navigation Menu Selector
+render_options() {
+    local selected="$1"
+    local num_options=${#MENU_OPTIONS[@]}
+    for i in "${!MENU_OPTIONS[@]}"; do
+        if [ "$i" -eq "$selected" ]; then
+            printf "\033[2K  %b▶%b %b[ %d ] %s%b\n" "$BCYAN" "$NC" "$BGREEN" "$i" "${MENU_OPTIONS[$i]}" "$NC"
+        else
+            printf "\033[2K    %b[ %d ]%b %s\n" "$GRAY" "$i" "$NC" "${MENU_OPTIONS[$i]}"
+        fi
+    done
+    printf "\033[2K%b\n" "$DIVIDER"
+    printf "\033[2K  %bUse [↑/↓] (or j/k) and [Enter] to select, or press [0-%d] directly%b\n" "$GRAY" "$((num_options - 1))" "$NC"
+}
+
+# Arrow-Key Navigation Menu Selector (Zero Flicker)
 select_menu_option() {
     MENU_CHOICE=""
     local selected=0
     local key=""
     local num_options=${#MENU_OPTIONS[@]}
+    local lines_count=$((num_options + 2))
 
     # Fallback to plain prompt if stdin is not a TTY (for piping/scripting)
     if [ ! -t 0 ]; then
@@ -1214,25 +1229,22 @@ select_menu_option() {
         return 0
     fi
 
+    # Clear once at start of menu session
+    clear
+    show_banner_and_status
+    echo -e "$DIVIDER"
+
     # Hide cursor
     tput civis 2>/dev/null || printf "\033[?25l"
     trap 'tput cnorm 2>/dev/null || printf "\033[?25h"' RETURN EXIT INT TERM
 
-    while true; do
-        clear
-        show_banner_and_status
-        echo -e "$DIVIDER"
-        for i in "${!MENU_OPTIONS[@]}"; do
-            if [ "$i" -eq "$selected" ]; then
-                echo -e "  ${BCYAN}▶${NC} ${BGREEN}[ $i ] ${MENU_OPTIONS[$i]}${NC}"
-            else
-                echo -e "    ${GRAY}[ $i ]${NC} ${MENU_OPTIONS[$i]}"
-            fi
-        done
-        echo -e "$DIVIDER"
-        echo -e "  ${GRAY}Use [↑/↓] (or j/k) and [Enter] to select, or press [0-$((num_options - 1))] directly${NC}"
+    # Initial render of options
+    render_options "$selected"
 
+    while true; do
         IFS= read -rsn1 key
+        local old_selected=$selected
+
         if [ "$key" = $'\x1b' ]; then
             read -rsn2 -t 0.1 rest
             key+="$rest"
@@ -1260,6 +1272,12 @@ select_menu_option() {
         elif [ "$key" = "q" ] || [ "$key" = "Q" ]; then
             selected=$((num_options - 1))
             break
+        fi
+
+        # In-place redraw without screen clearing (smooth, zero-flicker)
+        if [ "$selected" -ne "$old_selected" ]; then
+            printf "\033[%dA" "$lines_count"
+            render_options "$selected"
         fi
     done
 
