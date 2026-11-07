@@ -29,11 +29,17 @@ hadoop-handler --help
 
 # Direct subcommands
 hadoop-handler verify                 # Verify Hadoop, Java, and running daemons
+hadoop-handler install                # Install Apache Hadoop (defaults to 3.4.2)
+hadoop-handler install --version 3.3.6 # Install specific Hadoop version
+hadoop-handler upgrade 3.4.2          # In-place upgrade/downgrade preserving HDFS blocks
+hadoop-handler check-compat           # Validate Hadoop <-> Java matrix compatibility
+hadoop-handler java list              # List all installed Java JDKs
+hadoop-handler java switch            # Interactively choose active Java runtime
+hadoop-handler java use 21            # Switch active Java runtime for Hadoop
 hadoop-handler start                  # Start HDFS and YARN daemons
 hadoop-handler stop                   # Stop services
 hadoop-handler restart                # Restart cluster daemons
 hadoop-handler diagnose               # Check and repair dependencies
-hadoop-handler install                # Run automated installation with smooth progress
 hadoop-handler delete                 # Wipe and uninstall cluster
 hadoop-handler service enable         # Register cluster as systemd user service
 hadoop-handler service status         # Check systemd service status
@@ -75,18 +81,22 @@ chmod +x setup.sh
 
 ## Features & Menu Overview
 
-* **Arrow-Key Navigation (TUI Menu):** Navigate menu items effortlessly with `Up` / `Down` arrow keys, Vim keys (`j` / `k`), direct numbers (`0-9`), or `Enter` to select.
+* **Arrow-Key Navigation (TUI Menu):** Navigate menu items effortlessly with `Up` / `Down` arrow keys, Vim keys (`j` / `k`), direct numbers (`0-13`), or `Enter` to select. Zero-flicker in-place terminal redraw.
 * **Live Visual Status Badges:** Instant status display at the top of the menu:
   * Hadoop: `[Installed (3.4.2)]` or `[Not Installed]`
   * Java: `[OpenJDK 21]` or `[Missing]`
   * Services: `[5/5 Daemons Running]` or `[Stopped]`
+* **Dynamic Hadoop Version Selector:** Choose from modern versions (3.4.2, 3.4.1, 3.3.6, 3.3.5, 3.2.4) or provide a custom version during installation with automatic pre-flight compatibility checks.
+* **Java Runtime Detection & Switcher:** Detects all installed JDKs across standard system directories (`/usr/lib/jvm/`, macOS JVM paths) and enables instant active JVM switching for Hadoop (`hadoop-handler java list`, `hadoop-handler java switch`, `hadoop-handler java use <ver>`).
+* **Cross-Compatibility Matrix Checker:** Comprehensive matrix checker preventing common JVM reflection and security manager crashes across Hadoop 3.4+, 3.3.x, 3.2.x, and 2.x on Java 8, 11, 17, and 21 (`hadoop-handler check-compat`).
+* **In-Place Upgrades & Downgrades:** Upgrade or downgrade Hadoop versions in-place (`hadoop-handler upgrade [version]`) while preserving existing XML configurations and protecting HDFS data blocks from reformatting.
 * **Smooth Download Progress Bar:** Live, single-line progress indicator with byte counter, download rate (MB/s), and ETA calculation.
 * **Desktop Notifications:** Native desktop alerts via `notify-send` (Linux), Notification Center (macOS), or Toast (Windows) when downloads and cluster tasks complete.
 * **System Service Integration (systemd / launchd):** Manage Hadoop daemons via `systemctl --user` on Linux or `launchd` on macOS so services can run automatically on boot.
 * **Shell Autocompletion:** Native autocompletion support for `bash`, `zsh`, `fish`, and `powershell`.
 * **One-Command Self-Update:** Run `hadoop-handler update` to automatically pull updates from PyPI or git repositories.
 * **Version Update Banner:** Non-intrusive cached checks alerting you when a newer version is available.
-* **Diagnose / Auto-Repair:** Scans for missing utilities (`curl`, `tar`, `rsync`, OpenJDK 21, `sshd`) and safely installs them using your native package manager (`apt`, `dnf`, `yum`, `pacman`, `brew`).
+* **Diagnose / Auto-Repair:** Scans for missing utilities (`curl`, `tar`, `rsync`, OpenJDK, `sshd`) and safely installs them using your native package manager (`apt`, `dnf`, `yum`, `pacman`, `brew`).
 * **Idempotent Installation:** Secure downloads, SSH keypair generation, firewall port configuration, and safe NameNode formatting without wiping existing HDFS data blocks.
 
 ---
@@ -122,9 +132,10 @@ On Windows, open a Command Prompt (CMD) as Administrator and run:
 - [x] **System Service Integration**: Manage cluster via systemd user units on Linux or launchd on macOS.
 - [x] **Shell Autocompletion**: Subcommand autocompletion for Bash, Zsh, Fish, and PowerShell.
 - [x] **One-Command Self-Update**: In-place CLI updates (`hadoop-handler update`) and update check banner.
-- [ ] **Multiple Hadoop Version Support**: Side-by-side installations of multiple Hadoop versions (e.g. 3.3.6, 3.4.1, 3.4.2) with instant switching (`hadoop-handler use <version>`).
-- [ ] **Cross-Compatibility Checker**: Automated verification of Hadoop and Java runtime matrix to prevent JVM reflection crashes.
-- [ ] **In-Place Upgrades & Downgrades**: Upgrade or downgrade Hadoop versions seamlessly while preserving XML configurations and existing HDFS data blocks.
+- [x] **Dynamic Hadoop Version Selector**: Dynamic version picking (3.4.2, 3.4.1, 3.3.6, etc.) with pre-flight verification.
+- [x] **Java Runtime Detection & Switcher**: Multi-JDK detection and dynamic switching for Hadoop (`hadoop-env.sh`).
+- [x] **Cross-Compatibility Matrix Checker**: Automated verification of Hadoop and Java runtime matrix to prevent JVM reflection crashes.
+- [x] **In-Place Upgrades & Downgrades**: Upgrade or downgrade Hadoop versions seamlessly while preserving XML configurations and existing HDFS data blocks.
 
 ---
 

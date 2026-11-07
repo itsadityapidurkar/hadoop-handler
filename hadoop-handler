@@ -5,7 +5,7 @@
 #  Developer: Aditya Pidurkar (github.com/itsadityapidurkar)
 # ==============================================================================
 
-CURRENT_VERSION="1.1.0"
+CURRENT_VERSION="1.2.0"
 
 # Colors for terminal output
 RED='\033[0;31m'
@@ -41,6 +41,20 @@ send_notification() {
         notify-send "$title" "$message" 2>/dev/null || true
     elif [ "$OS_NAME" = "Darwin" ]; then
         osascript -e "display notification \"$message\" with title \"$title\"" 2>/dev/null || true
+    fi
+}
+
+# Resolve download URL for any given Hadoop version (mirrors with archive fallback)
+resolve_hadoop_url() {
+    local ver="$1"
+    local tar_name="hadoop-${ver}.tar.gz"
+    local mirror_url="https://downloads.apache.org/hadoop/common/hadoop-${ver}/${tar_name}"
+    local archive_url="https://archive.apache.org/dist/hadoop/common/hadoop-${ver}/${tar_name}"
+
+    if curl -s --head --max-time 3 "$mirror_url" 2>/dev/null | grep -E "200|302" >/dev/null; then
+        echo "$mirror_url"
+    else
+        echo "$archive_url"
     fi
 }
 
@@ -80,7 +94,7 @@ try:
             downloaded = 0
 
         start_time = time.time()
-        chunk_size = 131072 # 128 KB
+        chunk_size = 131072
         bar_width = 24
 
         print(f"        {title}...")
@@ -140,7 +154,6 @@ check_version_banner() {
         last_check=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
     fi
 
-    # Check at most once every 12 hours (43200 seconds) in the background
     if [ $((now - last_check)) -gt 43200 ]; then
         (
             local latest=$(curl -s --max-time 1.5 https://api.github.com/repos/itsadityapidurkar/hadoop-handler/releases/latest 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/' || echo "")
@@ -185,7 +198,7 @@ load_env() {
                 fi
             elif [ "$OS_NAME" = "Darwin" ]; then
                 if command -v java >/dev/null 2>&1; then
-                    export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+                    export JAVA_HOME=$(/usr/libexec/java_home 2>/dev/null || echo "")
                 fi
             fi
         fi
@@ -198,73 +211,329 @@ pause_screen() {
     read -r
 }
 
-# 1. Install Hadoop
-install_hadoop() {
-    clear
-    echo -e "$DIVIDER"
-    echo -e "  ${BCYAN}ACTION: Installing Apache Hadoop 3.4.2${NC}"
-    echo -e "$DIVIDER\n"
-    
-    # Check for Java 21
-    echo -e "  ${GRAY}[1/8]${NC} Checking for Java 21 compatibility..."
-    JAVA_VER=""
+# ==============================================================================
+#  JAVA DETECTION, SWITCHING & COMPATIBILITY CHECKER
+# ==============================================================================
+
+# Scan system for all installed JVMs
+detect_installed_javas() {
+    local seen_paths=()
+    local jvms=()
+
+    add_jvm() {
+        local jpath="$1"
+        [ -z "$jpath" ] && return
+        if [ -d "$jpath" ] && [ -x "$jpath/bin/java" ]; then
+            local real_path=$(cd -P "$jpath" 2>/dev/null && pwd)
+            for s in "${seen_paths[@]}"; do
+                [ "$s" = "$real_path" ] && return
+            done
+            seen_paths+=("$real_path")
+            local ver_str=$("$real_path/bin/java" -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/')
+            local major_ver=$(echo "$ver_str" | cut -d'.' -f1)
+            [ "$major_ver" = "1" ] && major_ver=$(echo "$ver_str" | cut -d'.' -f2)
+            jvms+=("${major_ver}|${ver_str}|${real_path}")
+        fi
+    }
+
+    [ -n "$JAVA_HOME" ] && add_jvm "$JAVA_HOME"
+
     if command -v java >/dev/null 2>&1; then
-        JAVA_VER=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
-        echo -e "        Found Java: ${GREEN}${JAVA_VER}${NC}"
+        local bin_j=$(readlink -f "$(which java)" 2>/dev/null || which java)
+        add_jvm "$(dirname "$(dirname "$bin_j")")"
     fi
 
-    if [[ "$JAVA_VER" == 21* ]]; then
-        echo -e "        Java 21 check: ${GREEN}Success${NC}"
-    else
-        echo -e "        Java 21 not found. Triggering automated installation..."
-        if [ "$OS_NAME" = "Linux" ]; then
-            if command -v apt-get >/dev/null 2>&1; then
-                echo -e "        Running: ${GRAY}sudo apt update && sudo apt install openjdk-21-jdk -y${NC}"
-                sudo apt-get update
-                sudo apt-get install openjdk-21-jdk -y || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
-            elif command -v dnf >/dev/null 2>&1; then
-                echo -e "        Running: ${GRAY}sudo dnf install java-21-openjdk-devel -y${NC}"
-                sudo dnf install java-21-openjdk-devel -y || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
-            elif command -v yum >/dev/null 2>&1; then
-                echo -e "        Running: ${GRAY}sudo yum install java-21-openjdk-devel -y${NC}"
-                sudo yum install java-21-openjdk-devel -y || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
-            elif command -v pacman >/dev/null 2>&1; then
-                echo -e "        Running: ${GRAY}sudo pacman -S jre21-openjdk jdk21-openjdk --noconfirm${NC}"
-                sudo pacman -S jre21-openjdk jdk21-openjdk --noconfirm || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
-            else
-                echo -e "  ${RED}[!] Supported package manager not found. Please install Java 21 manually.${NC}"
-                return 1
+    if [ -d "/usr/lib/jvm" ]; then
+        for d in /usr/lib/jvm/*; do
+            [ -d "$d" ] && add_jvm "$d"
+        done
+    fi
+
+    if [ -d "/Library/Java/JavaVirtualMachines" ]; then
+        for d in /Library/Java/JavaVirtualMachines/*/Contents/Home; do
+            [ -d "$d" ] && add_jvm "$d"
+        done
+    fi
+
+    for item in "${jvms[@]}"; do
+        echo "$item"
+    done
+}
+
+# Manage Java runtimes (list, switch, use)
+manage_java() {
+    local action="$1"
+    local arg="$2"
+
+    local jvm_records=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && jvm_records+=("$line")
+    done < <(detect_installed_javas)
+
+    if [ "$action" = "list" ]; then
+        clear
+        echo -e "$DIVIDER"
+        echo -e "  ${BCYAN}ACTION: Detected Java Runtimes (JVMs)${NC}"
+        echo -e "$DIVIDER\n"
+        printf "  %-7s %-12s %-45s %s\n" "INDEX" "VERSION" "PATH" "ACTIVE"
+        echo -e "  -----------------------------------------------------------------"
+        for idx in "${!jvm_records[@]}"; do
+            IFS="|" read -r major ver path <<< "${jvm_records[$idx]}"
+            local active=" "
+            if [ "$path" = "$JAVA_HOME" ]; then
+                active="${GREEN}[ACTIVE]${NC}"
             fi
-        elif [ "$OS_NAME" = "Darwin" ]; then
-            if command -v brew >/dev/null 2>&1; then
-                echo -e "        Running: ${GRAY}brew install openjdk@21${NC}"
-                brew install openjdk@21 || { echo -e "  ${RED}[!] Java installation failed.${NC}"; return 1; }
-                sudo ln -sfn /usr/local/opt/openjdk@21/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-21.jdk || true
-            else
-                echo -e "  ${RED}[!] Homebrew not found. Please install Homebrew or install Java 21 manually.${NC}"
-                return 1
-            fi
+            printf "  [%2d]    %-12s %-45s %b\n" "$((idx + 1))" "Java $major" "$path" "$active"
+        done
+        echo -e "$DIVIDER"
+        return 0
+    fi
+
+    # Switch / Use action
+    local chosen_path=""
+    if [ -n "$arg" ]; then
+        if [[ "$arg" =~ ^[0-9]+$ ]] && [ "$arg" -le "${#jvm_records[@]}" ] && [ "$arg" -gt 0 ]; then
+            IFS="|" read -r _ _ chosen_path <<< "${jvm_records[$((arg - 1))]}"
+        elif [ -d "$arg" ] && [ -x "$arg/bin/java" ]; then
+            chosen_path="$arg"
         else
-            echo -e "  ${RED}[!] Unsupported operating system. Please install Java 21 manually.${NC}"
-            return 1
+            for item in "${jvm_records[@]}"; do
+                IFS="|" read -r major ver path <<< "$item"
+                if [ "$major" = "$arg" ]; then
+                    chosen_path="$path"
+                    break
+                fi
+            done
         fi
     fi
 
-    # Determine Java Home dynamically
-    DETECTED_JAVA_HOME=""
-    if [ "$OS_NAME" = "Linux" ]; then
-        DETECTED_JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
-    elif [ "$OS_NAME" = "Darwin" ]; then
-        DETECTED_JAVA_HOME=$(/usr/libexec/java_home -v 21)
+    if [ -z "$chosen_path" ]; then
+        clear
+        echo -e "$DIVIDER"
+        echo -e "  ${BCYAN}ACTION: Switch Java Runtime for Hadoop${NC}"
+        echo -e "$DIVIDER\n"
+        echo -e "  Available Java Runtimes on this system:"
+        for idx in "${!jvm_records[@]}"; do
+            IFS="|" read -r major ver path <<< "${jvm_records[$idx]}"
+            local mark=" "
+            [ "$path" = "$JAVA_HOME" ] && mark="${GREEN}[ACTIVE]${NC}"
+            printf "    [ %d ] Java %-2s (%s) %b\n" "$((idx + 1))" "$major" "$path" "$mark"
+        done
+        echo -e "    [ 0 ] Cancel"
+        echo -e "$DIVIDER"
+        read -p "  Select Java runtime to use [1-${#jvm_records[@]}]: " pick
+        if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -gt 0 ] && [ "$pick" -le "${#jvm_records[@]}" ]; then
+            IFS="|" read -r _ _ chosen_path <<< "${jvm_records[$((pick - 1))]}"
+        else
+            echo -e "  Operation cancelled."
+            return 0
+        fi
     fi
-    echo -e "        Detected JAVA_HOME: ${GREEN}${DETECTED_JAVA_HOME}${NC}"
+
+    if [ -n "$chosen_path" ] && [ -d "$chosen_path" ]; then
+        export JAVA_HOME="$chosen_path"
+        echo -e "  [+] Setting JAVA_HOME=${GREEN}${chosen_path}${NC}"
+
+        if [ -n "$HADOOP_HOME" ] && [ -f "${HADOOP_HOME}/etc/hadoop/hadoop-env.sh" ]; then
+            sed -i.bak "s|^export JAVA_HOME=.*|export JAVA_HOME=${chosen_path}|g" "${HADOOP_HOME}/etc/hadoop/hadoop-env.sh" 2>/dev/null || \
+            sed -i '' "s|^export JAVA_HOME=.*|export JAVA_HOME=${chosen_path}|g" "${HADOOP_HOME}/etc/hadoop/hadoop-env.sh" 2>/dev/null
+            rm -f "${HADOOP_HOME}/etc/hadoop/hadoop-env.sh.bak"
+            echo -e "  [+] Updated ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh"
+        fi
+
+        local prof="$HOME/.bashrc"
+        [[ "$SHELL" == */zsh ]] && prof="$HOME/.zshrc"
+        if [ -f "$prof" ]; then
+            sed -i.bak "s|^export JAVA_HOME=.*|export JAVA_HOME=\"${chosen_path}\"|g" "$prof" 2>/dev/null || \
+            sed -i '' "s|^export JAVA_HOME=.*|export JAVA_HOME=\"${chosen_path}\"|g" "$prof" 2>/dev/null
+            rm -f "${prof}.bak"
+            echo -e "  [+] Updated ${prof}"
+        fi
+
+        echo -e "\n  ${GREEN}[✓] Active Java runtime switched successfully!${NC}"
+        send_notification "Hadoop Handler" "Switched Hadoop Java runtime to ${chosen_path}."
+
+        if command -v hadoop >/dev/null 2>&1; then
+            echo ""
+            check_compatibility "" ""
+        fi
+    fi
+}
+
+# Hadoop <-> Java Compatibility Matrix Checker
+check_compatibility() {
+    local hadoop_v="$1"
+    local java_v="$2"
+
+    if [ -z "$hadoop_v" ]; then
+        if command -v hadoop >/dev/null 2>&1; then
+            hadoop_v=$(hadoop version 2>/dev/null | head -n 1 | awk '{print $2}')
+        else
+            hadoop_v="3.4.2"
+        fi
+    fi
+
+    if [ -z "$java_v" ]; then
+        if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+            local j_str=$("$JAVA_HOME/bin/java" -version 2>&1 | head -n 1)
+            java_v=$(echo "$j_str" | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f1)
+            [ "$java_v" = "1" ] && java_v=$(echo "$j_str" | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f2)
+        elif command -v java >/dev/null 2>&1; then
+            local j_str=$(java -version 2>&1 | head -n 1)
+            java_v=$(echo "$j_str" | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f1)
+            [ "$java_v" = "1" ] && java_v=$(echo "$j_str" | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f2)
+        else
+            java_v="unknown"
+        fi
+    fi
+
+    local h_major=$(echo "$hadoop_v" | cut -d'.' -f1)
+    local h_minor=$(echo "$hadoop_v" | cut -d'.' -f2)
+    local j_major=$(echo "$java_v" | cut -d'.' -f1)
+    [ "$j_major" = "1" ] && j_major=$(echo "$java_v" | cut -d'.' -f2)
+
+    echo -e "  Checking compatibility: Hadoop ${CYAN}${hadoop_v}${NC} <-> Java ${CYAN}${java_v}${NC}..."
+
+    local compatible=true
+    local reason=""
+    local recommended=""
+
+    if [ "$h_major" -ge 3 ] && [ "$h_minor" -ge 4 ]; then
+        if [ "$j_major" -eq 8 ] || [ "$j_major" -eq 11 ] || [ "$j_major" -eq 17 ] || [ "$j_major" -eq 21 ]; then
+            compatible=true
+        elif [ "$j_major" -gt 21 ]; then
+            compatible=false
+            reason="Java $j_major is newer than officially validated LTS runtimes."
+            recommended="Java 11, 17, or 21"
+        else
+            compatible=false
+            reason="Hadoop 3.4+ requires at least Java 8."
+            recommended="Java 11, 17, or 21"
+        fi
+    elif [ "$h_major" -eq 3 ] && [ "$h_minor" -eq 3 ]; then
+        if [ "$j_major" -eq 8 ] || [ "$j_major" -eq 11 ] || [ "$j_major" -eq 17 ]; then
+            compatible=true
+        else
+            compatible=false
+            reason="Hadoop 3.3.x does not support Java $j_major (fails on Java 21+)."
+            recommended="Java 8, 11, or 17"
+        fi
+    elif [ "$h_major" -eq 3 ] && [ "$h_minor" -le 2 ]; then
+        if [ "$j_major" -eq 8 ] || [ "$j_major" -eq 11 ]; then
+            compatible=true
+        else
+            compatible=false
+            reason="Hadoop 3.0-3.2 fails on Java 17+ due to JVM module encapsulation (JEP 396/403)."
+            recommended="Java 8 or Java 11"
+        fi
+    elif [ "$h_major" -eq 2 ]; then
+        if [ "$j_major" -eq 7 ] || [ "$j_major" -eq 8 ]; then
+            compatible=true
+        else
+            compatible=false
+            reason="Hadoop 2.x only supports Java 7 or Java 8."
+            recommended="Java 8"
+        fi
+    fi
+
+    if [ "$compatible" = "true" ]; then
+        echo -e "  ${GREEN}[✓] Compatible: Hadoop ${hadoop_v} is officially verified on Java ${java_v}.${NC}"
+        return 0
+    else
+        echo -e "  ${RED}[!] Incompatibility Detected: ${reason}${NC}"
+        echo -e "      ${YELLOW}Recommended runtime for Hadoop ${hadoop_v}: ${recommended}.${NC}"
+        echo -e "      ${GRAY}Tip: Use 'hadoop-handler java switch' to select a compatible JVM.${NC}"
+        return 1
+    fi
+}
+
+# ==============================================================================
+#  INSTALLATION & IN-PLACE UPGRADE / DOWNGRADE
+# ==============================================================================
+
+# 1. Install Hadoop with Dynamic Version Selector
+install_hadoop() {
+    clear
+    load_env
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Installing Apache Hadoop (Dynamic Version Selector)${NC}"
+    echo -e "$DIVIDER\n"
+
+    local selected_ver="$1"
+    if [ "$selected_ver" = "--version" ]; then
+        selected_ver="$2"
+    fi
+
+    if [ -z "$selected_ver" ]; then
+        echo -e "  Select Hadoop Version to Install:"
+        echo -e "    1. 3.4.2 (Latest Stable, Java 8/11/17/21) [Default]"
+        echo -e "    2. 3.4.1 (Java 8/11/17/21)"
+        echo -e "    3. 3.3.6 (Production LTS, Java 8/11/17)"
+        echo -e "    4. 3.3.5 (Java 8/11)"
+        echo -e "    5. 3.2.4 (Legacy, Java 8/11)"
+        echo -e "    6. Custom version"
+        read -p "  Enter choice [1-6, default 1]: " vchoice
+        case "$vchoice" in
+            2) selected_ver="3.4.1" ;;
+            3) selected_ver="3.3.6" ;;
+            4) selected_ver="3.3.5" ;;
+            5) selected_ver="3.2.4" ;;
+            6) read -p "  Enter version string (e.g. 3.4.0): " selected_ver ;;
+            *) selected_ver="3.4.2" ;;
+        esac
+    fi
+
+    [ -z "$selected_ver" ] && selected_ver="3.4.2"
+    echo -e "\n  Target Hadoop Version: ${GREEN}${selected_ver}${NC}"
+
+    # Check / Detect Java Compatibility
+    echo -e "\n  ${GRAY}[1/8]${NC} Validating Java runtime..."
+    local detected_java_home=""
+    if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        detected_java_home="$JAVA_HOME"
+    elif command -v java >/dev/null 2>&1; then
+        detected_java_home=$(dirname $(dirname $(readlink -f $(which java) 2>/dev/null || which java)))
+    fi
+
+    if [ -n "$detected_java_home" ]; then
+        local j_cur=$("$detected_java_home/bin/java" -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f1)
+        [ "$j_cur" = "1" ] && j_cur=$("$detected_java_home/bin/java" -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f2)
+        echo -e "        Active Java: ${CYAN}Java ${j_cur}${NC} (${detected_java_home})"
+        
+        check_compatibility "$selected_ver" "$j_cur" || {
+            echo -e "\n  ${YELLOW}[!] Would you like to select an alternative installed Java? (y/N)${NC}"
+            read -p "  > " switch_j
+            if [[ "$switch_j" =~ ^[Yy]$ ]]; then
+                manage_java "switch"
+                load_env
+                detected_java_home="$JAVA_HOME"
+            fi
+        }
+    else
+        echo -e "        ${YELLOW}[!] No Java detected. Attempting to install OpenJDK 21...${NC}"
+        if [ "$OS_NAME" = "Linux" ]; then
+            if command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get update && sudo apt-get install -y openjdk-21-jdk || return 1
+            elif command -v dnf >/dev/null 2>&1; then
+                sudo dnf install -y java-21-openjdk-devel || return 1
+            elif command -v pacman >/dev/null 2>&1; then
+                sudo pacman -S --noconfirm jre21-openjdk jdk21-openjdk || return 1
+            fi
+            detected_java_home=$(dirname $(dirname $(readlink -f $(which java))))
+        elif [ "$OS_NAME" = "Darwin" ]; then
+            brew install openjdk@21 || return 1
+            detected_java_home=$(/usr/libexec/java_home -v 21 2>/dev/null || echo "")
+        fi
+    fi
+
+    [ -z "$detected_java_home" ] && detected_java_home="/usr/lib/jvm/default-java"
 
     # Target Locations
     HADOOP_DEST="/opt/hadoop"
     HADOOP_DATA_DIR="/opt/hadoop_data"
     HADOOP_TMP_DIR="/opt/hadoop_tmp"
-    HADOOP_TAR="hadoop-3.4.2.tar.gz"
-    DOWNLOAD_URL="https://archive.apache.org/dist/hadoop/common/hadoop-3.4.2/${HADOOP_TAR}"
+    HADOOP_TAR="hadoop-${selected_ver}.tar.gz"
+    DOWNLOAD_URL=$(resolve_hadoop_url "$selected_ver")
 
     if [ "$OS_NAME" = "Darwin" ]; then
         if [[ "$HOME" == *" "* ]]; then
@@ -282,96 +551,72 @@ install_hadoop() {
     echo -e "\n  ${GRAY}[2/8]${NC} Creating required system directories..."
     mkdir -p ~/Downloads
     if [ "$OS_NAME" = "Linux" ] && [[ "$HOME" == *" "* ]]; then
-        sudo mkdir -p "${HADOOP_DATA_DIR}/namenode"
-        sudo mkdir -p "${HADOOP_DATA_DIR}/datanode"
-        sudo mkdir -p "${HADOOP_TMP_DIR}"
+        sudo mkdir -p "${HADOOP_DATA_DIR}/namenode" "${HADOOP_DATA_DIR}/datanode" "${HADOOP_TMP_DIR}"
         sudo chown -R $USER:$USER "${HADOOP_DATA_DIR}" "${HADOOP_TMP_DIR}"
     else
-        mkdir -p "${HADOOP_DATA_DIR}/namenode"
-        mkdir -p "${HADOOP_DATA_DIR}/datanode"
-        mkdir -p "${HADOOP_TMP_DIR}"
+        mkdir -p "${HADOOP_DATA_DIR}/namenode" "${HADOOP_DATA_DIR}/datanode" "${HADOOP_TMP_DIR}"
     fi
 
-    # Download Hadoop 3.4.2 with smooth progress bar
-    echo -e "\n  ${GRAY}[3/8]${NC} Retrieving Apache Hadoop 3.4.2 tarball..."
+    # Download Hadoop tarball with smooth progress
+    echo -e "\n  ${GRAY}[3/8]${NC} Retrieving Apache Hadoop ${selected_ver} tarball..."
     if [ -f "$HOME/Downloads/${HADOOP_TAR}" ]; then
         echo -e "        ${HADOOP_TAR} already cached in ~/Downloads. Skipping download."
     else
-        download_file "${DOWNLOAD_URL}" "$HOME/Downloads/${HADOOP_TAR}" "Retrieving Apache Hadoop 3.4.2 tarball" || {
-            echo -e "  ${RED}[!] Download failed.${NC}"
+        download_file "${DOWNLOAD_URL}" "$HOME/Downloads/${HADOOP_TAR}" "Retrieving Apache Hadoop ${selected_ver}" || {
+            echo -e "  ${RED}[!] Download failed for ${selected_ver}.${NC}"
             rm -f "$HOME/Downloads/${HADOOP_TAR}"
             return 1
         }
-        send_notification "Hadoop Handler" "Apache Hadoop 3.4.2 tarball downloaded successfully."
+        send_notification "Hadoop Handler" "Apache Hadoop ${selected_ver} downloaded."
     fi
 
-    # Extract and Install
+    # Extract and Relocate
     echo -e "\n  ${GRAY}[4/8]${NC} Extracting and relocating binaries..."
     if [ "$OS_NAME" = "Linux" ]; then
-        if [ -d "${HADOOP_DEST}" ]; then
-            echo -e "        Removing existing directory at ${HADOOP_DEST}..."
-            sudo rm -rf "${HADOOP_DEST}"
-        fi
-        sudo tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C /opt || { echo -e "  ${RED}[!] Extraction failed. Tarball may be corrupted.${NC}"; return 1; }
-        sudo mv /opt/hadoop-3.4.2 "${HADOOP_DEST}"
+        [ -d "${HADOOP_DEST}" ] && sudo rm -rf "${HADOOP_DEST}"
+        sudo tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C /opt || { echo -e "  ${RED}[!] Extraction failed.${NC}"; return 1; }
+        sudo mv "/opt/hadoop-${selected_ver}" "${HADOOP_DEST}"
         sudo chown -R $USER:$USER "${HADOOP_DEST}"
-    else # macOS
-        if [ -d "${HADOOP_DEST}" ]; then
-            echo -e "        Removing existing directory at ${HADOOP_DEST}..."
-            rm -rf "${HADOOP_DEST}"
-        fi
+    else
+        [ -d "${HADOOP_DEST}" ] && rm -rf "${HADOOP_DEST}"
         if [[ "$HOME" == *" "* ]]; then
-            tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C /Users/Shared || { echo -e "  ${RED}[!] Extraction failed. Tarball may be corrupted.${NC}"; return 1; }
-            mv /Users/Shared/hadoop-3.4.2 "${HADOOP_DEST}"
+            tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C /Users/Shared || { echo -e "  ${RED}[!] Extraction failed.${NC}"; return 1; }
+            mv "/Users/Shared/hadoop-${selected_ver}" "${HADOOP_DEST}"
         else
-            tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C "$HOME/" || { echo -e "  ${RED}[!] Extraction failed. Tarball may be corrupted.${NC}"; return 1; }
-            mv "$HOME/hadoop-3.4.2" "${HADOOP_DEST}"
+            tar -xzf "$HOME/Downloads/${HADOOP_TAR}" -C "$HOME/" || { echo -e "  ${RED}[!] Extraction failed.${NC}"; return 1; }
+            mv "$HOME/hadoop-${selected_ver}" "${HADOOP_DEST}"
         fi
     fi
     echo -e "        Extraction completed successfully."
-    send_notification "Hadoop Handler" "Apache Hadoop 3.4.2 binaries extracted."
+    send_notification "Hadoop Handler" "Apache Hadoop ${selected_ver} binaries extracted."
 
     # Configure SSH
     echo -e "\n  ${GRAY}[5/8]${NC} Configuring passwordless SSH keys..."
     if [ ! -f ~/.ssh/id_rsa ]; then
-        echo -e "        Generating new SSH keypair..."
-        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" || { echo -e "  ${RED}[!] SSH key generation failed.${NC}"; return 1; }
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" || return 1
     fi
-    
-    # Avoid duplicating authorized_keys entry
     touch ~/.ssh/authorized_keys
     if ! grep -q "$(cat ~/.ssh/id_rsa.pub)" ~/.ssh/authorized_keys 2>/dev/null; then
         cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
     fi
-    chmod 700 ~/.ssh
-    chmod 600 ~/.ssh/authorized_keys
-    
-    # Add localhost to known_hosts to prevent prompts
+    chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
     if ! ssh-keygen -F localhost >/dev/null 2>&1; then
         ssh-keyscan -H localhost >> ~/.ssh/known_hosts 2>/dev/null
-    fi
-
-    if [ "$OS_NAME" = "Darwin" ]; then
-        echo -e "        ${YELLOW}Note for macOS:${NC} Ensure 'Remote Login' is enabled in sharing settings."
     fi
 
     # Configure Environment Variables
     echo -e "\n  ${GRAY}[6/8]${NC} Registering path variables in shell configuration..."
     SHELL_CONFIG=""
-    if [[ "$SHELL" == */zsh ]]; then
-        SHELL_CONFIG="$HOME/.zshrc"
-    else
-        SHELL_CONFIG="$HOME/.bashrc"
-    fi
+    [[ "$SHELL" == */zsh ]] && SHELL_CONFIG="$HOME/.zshrc" || SHELL_CONFIG="$HOME/.bashrc"
 
     ENV_MARKER="# --- HADOOP HANDLER ENVIRONMENT VARIABLES ---"
     if grep -q "$ENV_MARKER" "${SHELL_CONFIG}" 2>/dev/null; then
-        echo -e "        Environment variables already present in ${SHELL_CONFIG}. Skipping duplicate entry."
+        echo -e "        Environment variables already present in ${SHELL_CONFIG}."
     else
         cat << EOF >> "${SHELL_CONFIG}"
 
 $ENV_MARKER
-export JAVA_HOME="${DETECTED_JAVA_HOME}"
+export JAVA_HOME="${detected_java_home}"
 export HADOOP_HOME="${HADOOP_DEST}"
 export HADOOP_CONF_DIR="\${HADOOP_HOME}/etc/hadoop"
 export HADOOP_COMMON_HOME="\${HADOOP_HOME}"
@@ -384,7 +629,7 @@ EOF
         echo -e "        Variables appended to ${SHELL_CONFIG}."
     fi
 
-    # Configure XML Configuration Files
+    # Configure XML Files
     echo -e "\n  ${GRAY}[7/8]${NC} Building cluster configuration files..."
     CONF_DIR="${HADOOP_DEST}/etc/hadoop"
     LOCAL_CONF_DIR="${HADOOP_HANDLER_CONF_DIR:-${SCRIPT_DIR}/configs}"
@@ -397,20 +642,17 @@ EOF
         cp "${LOCAL_CONF_DIR}/yarn-site.xml" "${CONF_DIR}/"
         cp "${LOCAL_CONF_DIR}/workers" "${CONF_DIR}/"
         
-        # Replace template markers with space-free resolved paths
-        sed -i.bak "s|/home/YOUR_USERNAME/hadooptmp|${HADOOP_TMP_DIR}|g" "${CONF_DIR}/core-site.xml" || \
-        sed -i "" "s|/home/YOUR_USERNAME/hadooptmp|${HADOOP_TMP_DIR}|g" "${CONF_DIR}/core-site.xml"
+        sed -i.bak "s|/home/YOUR_USERNAME/hadooptmp|${HADOOP_TMP_DIR}|g" "${CONF_DIR}/core-site.xml" 2>/dev/null || \
+        sed -i "" "s|/home/YOUR_USERNAME/hadooptmp|${HADOOP_TMP_DIR}|g" "${CONF_DIR}/core-site.xml" 2>/dev/null
         
-        sed -i.bak "s|file:///home/YOUR_USERNAME/hadoopdata|file://${HADOOP_DATA_DIR}|g" "${CONF_DIR}/hdfs-site.xml" || \
-        sed -i "" "s|file:///home/YOUR_USERNAME/hadoopdata|file://${HADOOP_DATA_DIR}|g" "${CONF_DIR}/hdfs-site.xml"
+        sed -i.bak "s|file:///home/YOUR_USERNAME/hadoopdata|file://${HADOOP_DATA_DIR}|g" "${CONF_DIR}/hdfs-site.xml" 2>/dev/null || \
+        sed -i "" "s|file:///home/YOUR_USERNAME/hadoopdata|file://${HADOOP_DATA_DIR}|g" "${CONF_DIR}/hdfs-site.xml" 2>/dev/null
         
         rm -f "${CONF_DIR}/core-site.xml.bak" "${CONF_DIR}/hdfs-site.xml.bak"
     else
-        echo -e "        ${YELLOW}[!] Local templates missing. Generating fallback configurations...${NC}"
-        # core-site.xml
+        echo -e "        ${YELLOW}[!] Generating fallback configurations...${NC}"
         cat << EOF > "${CONF_DIR}/core-site.xml"
 <?xml version="1.0" encoding="UTF-8"?>
-<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <configuration>
     <property>
         <name>fs.defaultFS</name>
@@ -423,10 +665,8 @@ EOF
 </configuration>
 EOF
 
-        # hdfs-site.xml
         cat << EOF > "${CONF_DIR}/hdfs-site.xml"
 <?xml version="1.0" encoding="UTF-8"?>
-<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <configuration>
     <property>
         <name>dfs.replication</name>
@@ -442,58 +682,136 @@ EOF
     </property>
 </configuration>
 EOF
-
-        # workers
         echo "localhost" > "${CONF_DIR}/workers"
-
-        # mapred-site.xml
-        cat << EOF > "${CONF_DIR}/mapred-site.xml"
-<?xml version="1.0" encoding="UTF-8"?>
-<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
-<configuration>
-    <property>
-        <name>mapreduce.framework.name</name>
-        <value>yarn</value>
-    </property>
-    <property>
-        <name>mapreduce.application.classpath</name>
-        <value>\$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/*:\$HADOOP_MAPRED_HOME/share/hadoop/mapreduce/lib/*</value>
-    </property>
-</configuration>
-EOF
-
-        # yarn-site.xml
-        cat << EOF > "${CONF_DIR}/yarn-site.xml"
-<?xml version="1.0" encoding="UTF-8"?>
-<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
-<configuration>
-    <property>
-        <name>yarn.nodemanager.aux-services</name>
-        <value>mapreduce_shuffle</value>
-    </property>
-    <property>
-        <name>yarn.nodemanager.env-whitelist</name>
-        <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,CLASSPATH_PREPEND_DISTCACHE,HADOOP_YARN_HOME,HADOOP_MAPRED_HOME</value>
-    </property>
-</configuration>
-EOF
     fi
 
     # Configure hadoop-env.sh
-    sed -i.bak "s|^# export JAVA_HOME=.*|export JAVA_HOME=${DETECTED_JAVA_HOME}|g" "${CONF_DIR}/hadoop-env.sh" || \
-    sed -i "" "s|^# export JAVA_HOME=.*|export JAVA_HOME=${DETECTED_JAVA_HOME}|g" "${CONF_DIR}/hadoop-env.sh"
+    sed -i.bak "s|^# export JAVA_HOME=.*|export JAVA_HOME=${detected_java_home}|g" "${CONF_DIR}/hadoop-env.sh" 2>/dev/null || \
+    sed -i "" "s|^# export JAVA_HOME=.*|export JAVA_HOME=${detected_java_home}|g" "${CONF_DIR}/hadoop-env.sh" 2>/dev/null
 
     # Format NameNode
     echo -e "\n  ${GRAY}[8/8]${NC} Formatting HDFS NameNode system..."
     "${HADOOP_DEST}/bin/hdfs" namenode -format -force
 
-    # Load variables for the current running script session
     load_env
 
-    echo -e "\n  ${GREEN}[✓] Installation completed successfully!${NC}"
-    echo -e "      Please reload your shell profile to apply variables globally:"
-    echo -e "      ${YELLOW}source ${SHELL_CONFIG}${NC}"
-    send_notification "Hadoop Handler" "Hadoop installation and NameNode format finished."
+    echo -e "\n  ${GREEN}[✓] Installation of Hadoop ${selected_ver} completed successfully!${NC}"
+    echo -e "      Reload your shell profile: ${YELLOW}source ${SHELL_CONFIG}${NC}"
+    send_notification "Hadoop Handler" "Hadoop ${selected_ver} installation completed."
+}
+
+# In-Place Upgrade / Downgrade (Preserves HDFS Data Blocks)
+upgrade_hadoop() {
+    clear
+    load_env
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: In-Place Hadoop Upgrade / Downgrade${NC}"
+    echo -e "$DIVIDER\n"
+
+    if [ -z "$HADOOP_HOME" ] || [ ! -d "$HADOOP_HOME" ]; then
+        echo -e "  ${RED}[!] Error: No active Hadoop installation found. Please run Install first.${NC}"
+        return 1
+    fi
+
+    local current_ver=$(hadoop version 2>/dev/null | head -n 1 | awk '{print $2}')
+    [ -z "$current_ver" ] && current_ver="3.4.2"
+    echo -e "  Current Hadoop Version: ${CYAN}${current_ver}${NC}"
+
+    local target_ver="$1"
+    if [ -z "$target_ver" ]; then
+        echo -e "\n  Select Target Hadoop Version to Migrate To:"
+        echo -e "    1. 3.4.2 (Latest Stable, Java 8/11/17/21)"
+        echo -e "    2. 3.4.1 (Java 8/11/17/21)"
+        echo -e "    3. 3.3.6 (LTS Production, Java 8/11/17)"
+        echo -e "    4. 3.3.5 (Java 8/11)"
+        echo -e "    5. 3.2.4 (Legacy, Java 8/11)"
+        echo -e "    6. Custom version"
+        echo -e "    7. Cancel"
+        read -p "  Enter choice [1-7]: " ver_choice
+        case "$ver_choice" in
+            1) target_ver="3.4.2" ;;
+            2) target_ver="3.4.1" ;;
+            3) target_ver="3.3.6" ;;
+            4) target_ver="3.3.5" ;;
+            5) target_ver="3.2.4" ;;
+            6) read -p "  Enter target version (e.g. 3.4.0): " target_ver ;;
+            *) echo -e "  Migration cancelled."; return 0 ;;
+        esac
+    fi
+
+    if [ "$current_ver" = "$target_ver" ]; then
+        echo -e "  ${YELLOW}[*] Cluster is already running Hadoop ${target_ver}.${NC}"
+        return 0
+    fi
+
+    echo -e "\n  Target Hadoop Version: ${GREEN}${target_ver}${NC}"
+
+    # Verify Java compatibility
+    check_compatibility "$target_ver" "" || {
+        echo -e "\n  ${YELLOW}[!] Warning: Current Java runtime may not be compatible with Hadoop ${target_ver}.${NC}"
+        read -p "  Do you want to proceed anyway? (y/N): " ignore_compat
+        if [[ ! "$ignore_compat" =~ ^[Yy]$ ]]; then
+            echo -e "  Migration aborted. Please run 'hadoop-handler java switch' first."
+            return 1
+        fi
+    }
+
+    echo -e "\n  ${GRAY}[1/5]${NC} Stopping active cluster daemons..."
+    stop_services >/dev/null 2>&1 || true
+
+    echo -e "  ${GRAY}[2/5]${NC} Backing up cluster XML configurations..."
+    local backup_dir="/tmp/hadoop_conf_backup_$(date +%s)"
+    mkdir -p "$backup_dir"
+    local conf_src="${HADOOP_HOME}/etc/hadoop"
+    for f in core-site.xml hdfs-site.xml mapred-site.xml yarn-site.xml workers; do
+        [ -f "${conf_src}/$f" ] && cp "${conf_src}/$f" "$backup_dir/"
+    done
+    echo -e "        Configuration backup saved to ${backup_dir}."
+
+    local target_tar="hadoop-${target_ver}.tar.gz"
+    local download_url=$(resolve_hadoop_url "$target_ver")
+    echo -e "\n  ${GRAY}[3/5]${NC} Retrieving Hadoop ${target_ver}..."
+    if [ ! -f "$HOME/Downloads/${target_tar}" ]; then
+        download_file "$download_url" "$HOME/Downloads/${target_tar}" "Downloading Hadoop ${target_ver}" || {
+            echo -e "  ${RED}[!] Download failed for ${target_ver}.${NC}"
+            return 1
+        }
+    else
+        echo -e "        Using cached archive: ~/Downloads/${target_tar}"
+    fi
+
+    echo -e "\n  ${GRAY}[4/5]${NC} Relocating binaries (preserving HDFS blocks)..."
+    local hadoop_dest="${HADOOP_HOME}"
+    if [ "$OS_NAME" = "Linux" ]; then
+        sudo rm -rf "${hadoop_dest}"
+        sudo tar -xzf "$HOME/Downloads/${target_tar}" -C /opt || { echo -e "  ${RED}[!] Extraction failed.${NC}"; return 1; }
+        sudo mv "/opt/hadoop-${target_ver}" "${hadoop_dest}"
+        sudo chown -R $USER:$USER "${hadoop_dest}"
+    else
+        rm -rf "${hadoop_dest}"
+        tar -xzf "$HOME/Downloads/${target_tar}" -C "$HOME/" || { echo -e "  ${RED}[!] Extraction failed.${NC}"; return 1; }
+        mv "$HOME/hadoop-${target_ver}" "${hadoop_dest}"
+    fi
+
+    echo -e "\n  ${GRAY}[5/5]${NC} Restoring cluster XML configurations..."
+    local new_conf="${hadoop_dest}/etc/hadoop"
+    cp "$backup_dir"/* "$new_conf/" 2>/dev/null || true
+    
+    if [ -n "$JAVA_HOME" ]; then
+        sed -i.bak "s|^# export JAVA_HOME=.*|export JAVA_HOME=${JAVA_HOME}|g" "${new_conf}/hadoop-env.sh" 2>/dev/null || \
+        sed -i '' "s|^# export JAVA_HOME=.*|export JAVA_HOME=${JAVA_HOME}|g" "${new_conf}/hadoop-env.sh" 2>/dev/null
+    fi
+
+    rm -rf "$backup_dir"
+
+    echo -e "\n  ${GREEN}[✓] In-place migration to Hadoop ${target_ver} successful!${NC}"
+    echo -e "      (Existing HDFS data blocks and cluster settings were preserved)."
+    send_notification "Hadoop Handler" "Hadoop migrated to version ${target_ver}."
+
+    read -p "  Do you want to start cluster services now? (Y/n): " start_now
+    if [[ ! "$start_now" =~ ^[Nn]$ ]]; then
+        start_services
+    fi
 }
 
 # 2. Verify Hadoop Installation
@@ -518,7 +836,9 @@ verify_hadoop() {
     fi
 
     echo -ne "  ${GRAY}Java version:${NC}  "
-    if command -v java >/dev/null 2>&1; then
+    if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        echo -e "${GREEN}Available${NC} ($("$JAVA_HOME/bin/java" -version 2>&1 | head -n 1))"
+    elif command -v java >/dev/null 2>&1; then
         echo -e "${GREEN}Available${NC} ($(java -version 2>&1 | head -n 1))"
     else
         echo -e "${RED}Not found${NC}"
@@ -531,6 +851,9 @@ verify_hadoop() {
     else
         echo -e "  ${RED}'jps' command is not available. Please ensure OpenJDK is fully configured.${NC}"
     fi
+
+    echo ""
+    check_compatibility "" ""
 }
 
 # 3. Start Hadoop Services
@@ -546,8 +869,11 @@ start_services() {
         return
     fi
 
+    # Compatibility pre-flight check
+    check_compatibility "" ""
+
     # Start HDFS (NameNode, DataNode, SecondaryNameNode)
-    echo -e "  ${GRAY}[1/2]${NC} Starting Distributed File System (HDFS)..."
+    echo -e "\n  ${GRAY}[1/2]${NC} Starting Distributed File System (HDFS)..."
     if command -v start-dfs.sh >/dev/null 2>&1; then
         start-dfs.sh
     else
@@ -621,7 +947,6 @@ delete_hadoop() {
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         load_env
         
-        # Stop services first
         stop_services >/dev/null 2>&1 || true
         
         echo -e "\n  ${GRAY}[1/3]${NC} Deleting binaries and directories..."
@@ -635,7 +960,7 @@ delete_hadoop() {
         fi
 
         echo -e "\n  ${GRAY}[2/3]${NC} Removing downloaded archives..."
-        rm -f "$HOME/Downloads/hadoop-3.4.2.tar.gz"
+        rm -f "$HOME"/Downloads/hadoop-*.tar.gz
         echo -e "        Removed tarball cache."
 
         echo -e "\n  ${GRAY}[3/3]${NC} Cleaning up environment variables..."
@@ -648,14 +973,7 @@ delete_hadoop() {
             fi
         done
 
-        # Reset session variables
-        unset HADOOP_HOME
-        unset HADOOP_CONF_DIR
-        unset HADOOP_COMMON_HOME
-        unset HADOOP_HDFS_HOME
-        unset HADOOP_MAPRED_HOME
-        unset YARN_HOME
-        unset HADOOP_COMMON_LIB_NATIVE_DIR
+        unset HADOOP_HOME HADOOP_CONF_DIR HADOOP_COMMON_HOME HADOOP_HDFS_HOME HADOOP_MAPRED_HOME YARN_HOME HADOOP_COMMON_LIB_NATIVE_DIR
 
         echo -e "\n  ${GREEN}[✓] Uninstall completed. Please reload your shell profile:${NC}"
         echo -e "      ${YELLOW}source ~/.bashrc${NC} (or ${YELLOW}source ~/.zshrc${NC})"
@@ -747,7 +1065,6 @@ EOF
                 ;;
             *)
                 echo -e "  ${RED}[!] Unknown service action: ${action}${NC}"
-                echo -e "      Supported: enable, disable, status, start, stop"
                 ;;
         esac
     elif [ "$OS_NAME" = "Darwin" ]; then
@@ -785,7 +1102,7 @@ EOF
                 echo -e "  ${GREEN}[✓] LaunchAgent disabled for macOS.${NC}"
                 ;;
             *)
-                echo -e "  ${YELLOW}Use 'hadoop-handler service enable' or 'disable' on macOS.${NC}"
+                echo -e "  ${YELLOW}Use 'enable' or 'disable' on macOS.${NC}"
                 ;;
         esac
     fi
@@ -800,7 +1117,6 @@ self_update() {
 
     local updated=false
 
-    # 1. Update ~/.hadoop-handler if present
     if [ -d "$HOME/.hadoop-handler/.git" ]; then
         echo -e "  [+] Checking global installation in ~/.hadoop-handler..."
         (cd "$HOME/.hadoop-handler" && git pull origin main)
@@ -808,7 +1124,6 @@ self_update() {
         updated=true
     fi
 
-    # 2. Update local repository if different
     if [ -d "${SCRIPT_DIR}/.git" ] && [ "${SCRIPT_DIR}" != "$HOME/.hadoop-handler" ]; then
         echo -e "  [+] Pulling latest changes in ${SCRIPT_DIR}..."
         (cd "${SCRIPT_DIR}" && git pull origin main)
@@ -816,7 +1131,6 @@ self_update() {
         updated=true
     fi
 
-    # 3. Update pip package if installed via pip
     if command -v pip >/dev/null 2>&1 && pip list 2>/dev/null | grep -q "hadoop-handler"; then
         echo -e "  [+] Upgrading pip package..."
         pip install --upgrade hadoop-handler 2>/dev/null || true
@@ -861,10 +1175,13 @@ _hadoop_handler_completions() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="diagnose install verify status start stop restart delete service update completion --version --help --install-completion"
+    opts="diagnose install verify status start stop restart upgrade check-compat java delete service update completion --version --help --install-completion"
 
     if [ "$prev" = "service" ]; then
         COMPREPLY=( $(compgen -W "enable disable status start stop" -- "$cur") )
+        return 0
+    elif [ "$prev" = "java" ]; then
+        COMPREPLY=( $(compgen -W "list switch use" -- "$cur") )
         return 0
     elif [ "$prev" = "completion" ]; then
         COMPREPLY=( $(compgen -W "bash zsh fish powershell" -- "$cur") )
@@ -894,10 +1211,13 @@ _hadoop_handler_completions() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="diagnose install verify status start stop restart delete service update completion --version --help --install-completion"
+    opts="diagnose install verify status start stop restart upgrade check-compat java delete service update completion --version --help --install-completion"
 
     if [ "$prev" = "service" ]; then
         COMPREPLY=( $(compgen -W "enable disable status start stop" -- "$cur") )
+        return 0
+    elif [ "$prev" = "java" ]; then
+        COMPREPLY=( $(compgen -W "list switch use" -- "$cur") )
         return 0
     elif [ "$prev" = "completion" ]; then
         COMPREPLY=( $(compgen -W "bash zsh fish powershell" -- "$cur") )
@@ -919,8 +1239,9 @@ EOF
             local fish_dir="$HOME/.config/fish/completions"
             mkdir -p "$fish_dir"
             cat << "EOF" > "${fish_dir}/hadoop-handler.fish"
-complete -c hadoop-handler -f -a "diagnose install verify status start stop restart delete service update completion --version --help --install-completion"
+complete -c hadoop-handler -f -a "diagnose install verify status start stop restart upgrade check-compat java delete service update completion --version --help --install-completion"
 complete -c hadoop-handler -n "__fish_seen_subcommand_from service" -f -a "enable disable status start stop"
+complete -c hadoop-handler -n "__fish_seen_subcommand_from java" -f -a "list switch use"
 complete -c hadoop-handler -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish powershell"
 EOF
             echo -e "  ${GREEN}[✓] Fish completions saved to ${fish_dir}/hadoop-handler.fish!${NC}"
@@ -929,7 +1250,7 @@ EOF
             cat << "EOF"
 Register-ArgumentCompleter -Native -CommandName hadoop-handler -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('diagnose', 'install', 'verify', 'status', 'start', 'stop', 'restart', 'delete', 'service', 'update', 'completion', '--version', '--help')
+    $commands = @('diagnose', 'install', 'verify', 'status', 'start', 'stop', 'restart', 'upgrade', 'check-compat', 'java', 'delete', 'service', 'update', 'completion', '--version', '--help')
     $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
@@ -938,7 +1259,7 @@ EOF
             echo -e "  ${GREEN}[✓] Add the snippet above to your PowerShell profile (\$PROFILE).${NC}"
             ;;
         *)
-            echo -e "  ${RED}[!] Unsupported shell: ${target_shell}. Supported: bash, zsh, fish, powershell.${NC}"
+            echo -e "  ${RED}[!] Unsupported shell: ${target_shell}.${NC}"
             ;;
     esac
 }
@@ -955,7 +1276,6 @@ diagnose_environment() {
     
     echo -e "  ${GRAY}Scanning critical utilities...${NC}"
     
-    # 1. Package Manager Detection
     local pkg_manager=""
     if [ "$OS_NAME" = "Linux" ]; then
         if command -v apt-get >/dev/null 2>&1; then
@@ -975,7 +1295,6 @@ diagnose_environment() {
         fi
     fi
 
-    # Helper function to check command and suggest repair
     check_dependency() {
         local cmd=$1
         local pkg_apt=$2
@@ -989,49 +1308,27 @@ diagnose_environment() {
         else
             echo -e "${RED}[MISSING]${NC}"
             missing_deps+=("$cmd")
-            
             case "$pkg_manager" in
-                apt)
-                    [ -n "$pkg_apt" ] && repair_cmds+=("sudo apt-get install -y $pkg_apt")
-                    ;;
-                dnf|yum)
-                    [ -n "$pkg_dnf" ] && repair_cmds+=("sudo $pkg_manager install -y $pkg_dnf")
-                    ;;
-                pacman)
-                    [ -n "$pkg_pacman" ] && repair_cmds+=("sudo pacman -S --noconfirm $pkg_pacman")
-                    ;;
-                brew)
-                    [ -n "$pkg_brew" ] && repair_cmds+=("brew install $pkg_brew")
-                    ;;
+                apt) [ -n "$pkg_apt" ] && repair_cmds+=("sudo apt-get install -y $pkg_apt") ;;
+                dnf|yum) [ -n "$pkg_dnf" ] && repair_cmds+=("sudo $pkg_manager install -y $pkg_dnf") ;;
+                pacman) [ -n "$pkg_pacman" ] && repair_cmds+=("sudo pacman -S --noconfirm $pkg_pacman") ;;
+                brew) [ -n "$pkg_brew" ] && repair_cmds+=("brew install $pkg_brew") ;;
             esac
         fi
     }
 
-    # Core utilities required by Hadoop scripts
     check_dependency "curl" "curl" "curl" "curl" "curl"
     check_dependency "tar" "tar" "tar" "tar" ""
     check_dependency "ssh" "openssh-client openssh-server" "openssh-clients openssh-server" "openssh" ""
     check_dependency "rsync" "rsync" "rsync" "rsync" "rsync"
     
-    # Check Java
-    echo -ne "  - Checking for ${CYAN}Java (OpenJDK 21)${NC}... "
+    echo -ne "  - Checking for ${CYAN}Java Runtime (OpenJDK)${NC}... "
     if command -v java >/dev/null 2>&1; then
         local jv=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
-        if [[ "$jv" == 21* ]]; then
-            echo -e "${GREEN}[OK] (${jv})${NC}"
-        else
-            echo -e "${YELLOW}[VERSION MISMATCH] (Found ${jv}, required 21)${NC}"
-            missing_deps+=("java21")
-            case "$pkg_manager" in
-                apt) repair_cmds+=("sudo apt-get install -y openjdk-21-jdk") ;;
-                dnf|yum) repair_cmds+=("sudo $pkg_manager install -y java-21-openjdk-devel") ;;
-                pacman) repair_cmds+=("sudo pacman -S --noconfirm jre21-openjdk jdk21-openjdk") ;;
-                brew) repair_cmds+=("brew install openjdk@21") ;;
-            esac
-        fi
+        echo -e "${GREEN}[OK] (${jv})${NC}"
     else
         echo -e "${RED}[MISSING]${NC}"
-        missing_deps+=("java21")
+        missing_deps+=("java")
         case "$pkg_manager" in
             apt) repair_cmds+=("sudo apt-get install -y openjdk-21-jdk") ;;
             dnf|yum) repair_cmds+=("sudo $pkg_manager install -y java-21-openjdk-devel") ;;
@@ -1040,7 +1337,6 @@ diagnose_environment() {
         esac
     fi
 
-    # SSH Server Status (Linux only)
     if [ "$OS_NAME" = "Linux" ]; then
         echo -ne "  - Checking for ${CYAN}SSH Daemon (sshd)${NC}... "
         if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
@@ -1059,8 +1355,6 @@ diagnose_environment() {
         return 0
     else
         echo -e "  ${YELLOW}[!] Diagnostics identified ${#missing_deps[@]} missing requirement(s).${NC}"
-        
-        # Save repair commands to temp files
         printf "%s\n" "${repair_cmds[@]}" > /tmp/hadoop_repair_cmds.txt
         printf "%s\n" "${missing_deps[@]}" > /tmp/hadoop_repair_missing.txt
         return 1
@@ -1117,7 +1411,10 @@ diagnose_and_repair() {
     fi
 }
 
-# Banner and Visual Status Badges
+# ==============================================================================
+#  TUI RENDERER & INTERACTIVE NAVIGATION
+# ==============================================================================
+
 show_banner_and_status() {
     echo -e "${CYAN}"
     cat << "EOF"
@@ -1127,17 +1424,15 @@ show_banner_and_status() {
 EOF
     echo -e "${NC}"
     echo -e "  ${GRAY}Developer:${NC} ${BCYAN}Aditya Pidurkar${NC} (${CYAN}github.com/itsadityapidurkar${NC})"
-    echo -e "  ${GRAY}Scope:${NC}     Apache Hadoop 3.4.2 Single-Node Control Center"
+    echo -e "  ${GRAY}Scope:${NC}     Apache Hadoop Single-Node Control Center (v${CURRENT_VERSION})"
     echo -e "$DIVIDER"
     
-    # Check for update banner
     check_version_banner
 
-    # Compute status badges
     local h_stat=""
     if command -v hadoop >/dev/null 2>&1; then
         local h_ver=$(hadoop version 2>/dev/null | head -n 1 | awk '{print $2}')
-        [ -z "$h_ver" ] && h_ver="3.4.2"
+        [ -z "$h_ver" ] && h_ver="Installed"
         h_stat="${BGREEN}[✓ Installed (${h_ver})]${NC}"
     elif [ -n "$HADOOP_HOME" ] && [ -d "$HADOOP_HOME" ]; then
         h_stat="${BGREEN}[✓ Installed]${NC}"
@@ -1146,10 +1441,14 @@ EOF
     fi
 
     local j_stat=""
-    if command -v java >/dev/null 2>&1; then
+    if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        local j_ver=$("$JAVA_HOME/bin/java" -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f1)
+        [ "$j_ver" = "1" ] && j_ver=$("$JAVA_HOME/bin/java" -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f2)
+        j_stat="${BGREEN}[✓ Java ${j_ver}]${NC}"
+    elif command -v java >/dev/null 2>&1; then
         local j_ver=$(java -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f1)
-        [ "$j_ver" = "1" ] && j_ver="8"
-        j_stat="${BGREEN}[✓ OpenJDK ${j_ver}]${NC}"
+        [ "$j_ver" = "1" ] && j_ver=$(java -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f2)
+        j_stat="${BGREEN}[✓ Java ${j_ver}]${NC}"
     else
         j_stat="${BRED}[✗ Missing]${NC}"
     fi
@@ -1180,10 +1479,14 @@ EOF
 
 MENU_OPTIONS=(
     "Diagnose/Repair System Dependencies"
-    "Install Hadoop"
-    "Verify Hadoop Installation"
+    "Install Hadoop (Dynamic Version Selector)"
+    "Verify Hadoop Installation & Daemons"
+    "Hadoop <-> Java Compatibility Checker"
     "Start Hadoop Services (HDFS & YARN)"
     "Stop Hadoop Services"
+    "Restart Hadoop Services"
+    "Java Runtime Selector & Switcher"
+    "In-Place Hadoop Upgrade / Downgrade"
     "Delete Hadoop Completely"
     "System Service Integration (systemd)"
     "Check for Updates (Self-Update)"
@@ -1198,9 +1501,9 @@ render_options() {
     local num_options=${#MENU_OPTIONS[@]}
     for i in "${!MENU_OPTIONS[@]}"; do
         if [ "$i" -eq "$selected" ]; then
-            printf "\033[2K  %b▶%b %b[ %d ] %s%b\n" "$BCYAN" "$NC" "$BGREEN" "$i" "${MENU_OPTIONS[$i]}" "$NC"
+            printf "\033[2K  %b▶%b %b[ %2d ] %s%b\n" "$BCYAN" "$NC" "$BGREEN" "$i" "${MENU_OPTIONS[$i]}" "$NC"
         else
-            printf "\033[2K    %b[ %d ]%b %s\n" "$GRAY" "$i" "$NC" "${MENU_OPTIONS[$i]}"
+            printf "\033[2K    %b[ %2d ]%b %s\n" "$GRAY" "$i" "$NC" "${MENU_OPTIONS[$i]}"
         fi
     done
     printf "\033[2K%b\n" "$DIVIDER"
@@ -1215,7 +1518,6 @@ select_menu_option() {
     local num_options=${#MENU_OPTIONS[@]}
     local lines_count=$((num_options + 2))
 
-    # Fallback to plain prompt if stdin is not a TTY (for piping/scripting)
     if [ ! -t 0 ]; then
         clear
         show_banner_and_status
@@ -1224,21 +1526,18 @@ select_menu_option() {
             echo -e "  [ $i ] ${MENU_OPTIONS[$i]}"
         done
         echo -e "$DIVIDER"
-        read -r choice || choice=9
-        MENU_CHOICE="${choice:-9}"
+        read -r choice || choice=13
+        MENU_CHOICE="${choice:-13}"
         return 0
     fi
 
-    # Clear once at start of menu session
     clear
     show_banner_and_status
     echo -e "$DIVIDER"
 
-    # Hide cursor
     tput civis 2>/dev/null || printf "\033[?25l"
     trap 'tput cnorm 2>/dev/null || printf "\033[?25h"' RETURN EXIT INT TERM
 
-    # Initial render of options
     render_options "$selected"
 
     while true; do
@@ -1249,11 +1548,11 @@ select_menu_option() {
             read -rsn2 -t 0.1 rest
             key+="$rest"
             case "$key" in
-                $'\x1b[A'|$'\x1bOA') # Up arrow
+                $'\x1b[A'|$'\x1bOA')
                     ((selected--))
                     [ $selected -lt 0 ] && selected=$((num_options - 1))
                     ;;
-                $'\x1b[B'|$'\x1bOB') # Down arrow
+                $'\x1b[B'|$'\x1bOB')
                     ((selected++))
                     [ $selected -ge $num_options ] && selected=0
                     ;;
@@ -1274,22 +1573,22 @@ select_menu_option() {
             break
         fi
 
-        # In-place redraw without screen clearing (smooth, zero-flicker)
         if [ "$selected" -ne "$old_selected" ]; then
             printf "\033[%dA" "$lines_count"
             render_options "$selected"
         fi
     done
 
-    # Restore cursor
     tput cnorm 2>/dev/null || printf "\033[?25h"
     MENU_CHOICE="$selected"
 }
 
-# Load environment on launch
+# ==============================================================================
+#  CLI DISPATCHER & MAIN LOOP
+# ==============================================================================
+
 load_env
 
-# CLI Subcommands & Flags
 if [ -n "$1" ]; then
     case "$1" in
         0|diagnose|repair)
@@ -1297,11 +1596,21 @@ if [ -n "$1" ]; then
             exit $?
             ;;
         1|install)
-            install_hadoop
+            shift
+            install_hadoop "$@"
             exit $?
             ;;
         2|verify|status)
             verify_hadoop
+            exit $?
+            ;;
+        check-compat|compat)
+            shift
+            clear
+            echo -e "$DIVIDER"
+            echo -e "  ${BCYAN}ACTION: Hadoop <-> Java Compatibility Checker${NC}"
+            echo -e "$DIVIDER\n"
+            check_compatibility "$1" "$2"
             exit $?
             ;;
         3|start)
@@ -1316,6 +1625,22 @@ if [ -n "$1" ]; then
             stop_services
             sleep 2
             start_services
+            exit $?
+            ;;
+        java)
+            shift
+            sub_cmd="$1"
+            shift
+            case "$sub_cmd" in
+                list) manage_java "list" ;;
+                use) manage_java "use" "$1" ;;
+                switch|*) manage_java "switch" "$1" ;;
+            esac
+            exit $?
+            ;;
+        upgrade)
+            shift
+            upgrade_hadoop "$1"
             exit $?
             ;;
         5|delete)
@@ -1341,7 +1666,7 @@ if [ -n "$1" ]; then
             exit $?
             ;;
         menu)
-            # Fall through to interactive loop
+            # Fall through to menu loop
             ;;
         -v|--version)
             echo "hadoop-handler ${CURRENT_VERSION}"
@@ -1352,20 +1677,24 @@ if [ -n "$1" ]; then
             echo "Usage: hadoop-handler [command] [options]"
             echo ""
             echo "Commands:"
-            echo "  (no args)               Launch interactive TUI control panel"
-            echo "  diagnose                Diagnose/Repair system dependencies"
-            echo "  install                 Install and configure Apache Hadoop 3.4.2"
-            echo "  verify, status          Check Hadoop and Java status and running daemons"
-            echo "  start                   Start Hadoop services (HDFS & YARN)"
-            echo "  stop                    Stop Hadoop services"
-            echo "  restart                 Restart all cluster daemons"
-            echo "  delete                  Delete Hadoop cluster installation completely"
-            echo "  service <action>        Manage system service (enable|disable|status|start|stop)"
-            echo "  update                  Check and perform in-place self-update"
-            echo "  completion <shell>      Generate autocompletion script (bash|zsh|fish|powershell)"
-            echo "  --install-completion    Automatically install autocompletion for current shell"
-            echo "  -v, --version           Show version"
-            echo "  -h, --help              Show this help message"
+            echo "  (no args)                     Launch interactive TUI control panel"
+            echo "  install [--version <ver>]     Install Hadoop with version selection"
+            echo "  upgrade [<target_version>]    In-place upgrade/downgrade preserving HDFS data"
+            echo "  check-compat [<h_ver>] [<j>]  Check Hadoop and Java matrix compatibility"
+            echo "  java list                     List all detected Java runtimes"
+            echo "  java use <path|version>       Switch active Java runtime for Hadoop"
+            echo "  java switch                   Interactively switch active Java runtime"
+            echo "  verify, status                Check Hadoop and Java status and running daemons"
+            echo "  start                         Start Hadoop services (HDFS & YARN)"
+            echo "  stop                          Stop Hadoop services"
+            echo "  restart                       Restart all cluster daemons"
+            echo "  delete                        Delete Hadoop cluster installation completely"
+            echo "  service <action>              Manage system service (enable|disable|status|start|stop)"
+            echo "  update                        Check and perform in-place self-update"
+            echo "  completion <shell>            Generate autocompletion script"
+            echo "  --install-completion          Automatically install autocompletion for current shell"
+            echo "  -v, --version                 Show version"
+            echo "  -h, --help                    Show this help message"
             exit 0
             ;;
         *)
@@ -1376,10 +1705,9 @@ if [ -n "$1" ]; then
     esac
 fi
 
-# Interactive Menu Loop
 while true; do
     select_menu_option
-    
+
     case $MENU_CHOICE in
         0)
             diagnose_and_repair
@@ -1394,30 +1722,52 @@ while true; do
             pause_screen
             ;;
         3)
-            start_services
+            clear
+            echo -e "$DIVIDER"
+            echo -e "  ${BCYAN}ACTION: Hadoop <-> Java Compatibility Checker${NC}"
+            echo -e "$DIVIDER\n"
+            check_compatibility "" ""
             pause_screen
             ;;
         4)
-            stop_services
+            start_services
             pause_screen
             ;;
         5)
-            delete_hadoop
+            stop_services
             pause_screen
             ;;
         6)
-            manage_system_service
+            stop_services
+            sleep 2
+            start_services
             pause_screen
             ;;
         7)
-            self_update
+            manage_java "switch"
             pause_screen
             ;;
         8)
-            install_shell_completion
+            upgrade_hadoop
             pause_screen
             ;;
         9)
+            delete_hadoop
+            pause_screen
+            ;;
+        10)
+            manage_system_service
+            pause_screen
+            ;;
+        11)
+            self_update
+            pause_screen
+            ;;
+        12)
+            install_shell_completion
+            pause_screen
+            ;;
+        13)
             clear
             echo -e "\n  Exiting Hadoop Handler. Goodbye!"
             exit 0

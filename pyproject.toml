@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hadoop-handler"
-version = "1.1.0"
-description = "Interactive cross-platform control panel for Apache Hadoop 3.4.2 Single-Node clusters"
+version = "1.2.0"
+description = "Interactive cross-platform control panel for Apache Hadoop Single-Node clusters with version switching, Java management, and compatibility matrix checker"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "Apache-2.0"
