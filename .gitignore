@@ -15,5 +15,7 @@ venv/
 env/
 /tmp/hadoop_test_venv/
 
-# Logs
+# Logs and cache
 *.log
+.version_cache
+*.cache
