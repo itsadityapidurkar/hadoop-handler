@@ -66,6 +66,7 @@ hadoop-handler = "hadoop_handler.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["hadoop_handler*"]
+exclude = ["*.__pycache__*"]
 
 [tool.setuptools.package-data]
 hadoop_handler = [
