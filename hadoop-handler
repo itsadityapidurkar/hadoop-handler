@@ -264,7 +264,7 @@ EOF
     # Configure XML Configuration Files
     echo -e "\n  ${GRAY}[7/8]${NC} Building cluster configuration files..."
     CONF_DIR="${HADOOP_DEST}/etc/hadoop"
-    LOCAL_CONF_DIR="${SCRIPT_DIR}/configs"
+    LOCAL_CONF_DIR="${HADOOP_HANDLER_CONF_DIR:-${SCRIPT_DIR}/configs}"
 
     if [ -d "$LOCAL_CONF_DIR" ]; then
         echo -e "        Loading XML templates from local configs directory..."
@@ -683,8 +683,67 @@ EOF
     echo -e "$DIVIDER"
 }
 
-# Interactive Menu Loop
+# CLI Subcommands & Flags
 load_env
+
+if [ -n "$1" ]; then
+    case "$1" in
+        0|diagnose|repair)
+            diagnose_and_repair
+            exit $?
+            ;;
+        1|install)
+            install_hadoop
+            exit $?
+            ;;
+        2|verify|status)
+            verify_hadoop
+            exit $?
+            ;;
+        3|start)
+            start_services
+            exit $?
+            ;;
+        4|stop)
+            stop_services
+            exit $?
+            ;;
+        5|delete)
+            delete_hadoop
+            exit $?
+            ;;
+        menu)
+            # Fall through to interactive loop
+            ;;
+        -v|--version)
+            echo "hadoop-handler 1.0.0"
+            exit 0
+            ;;
+        -h|--help)
+            echo "Hadoop Handler — Single-Node Cluster Control Center"
+            echo "Usage: hadoop-handler [command]"
+            echo ""
+            echo "Commands:"
+            echo "  (no args)   Launch interactive menu"
+            echo "  diagnose    Diagnose/Repair system dependencies"
+            echo "  install     Install and configure Apache Hadoop 3.4.2"
+            echo "  verify      Verify Hadoop and Java installation and running daemons"
+            echo "  start       Start Hadoop services (HDFS & YARN)"
+            echo "  stop        Stop Hadoop services"
+            echo "  delete      Delete Hadoop installation completely"
+            echo "  -v, --version  Show version"
+            echo "  -h, --help     Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown command: $1"
+            echo "Run 'hadoop-handler --help' for usage."
+            exit 1
+            ;;
+    esac
+fi
+
+# Interactive Menu Loop
 
 while true; do
     clear

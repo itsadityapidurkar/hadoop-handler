@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.
+-->
+
+<configuration>
+
+    <!--
+        Default filesystem used by Hadoop.
+        Since this is a single-node cluster, the NameNode
+        runs on the local machine (localhost) on port 9000.
+    -->
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://localhost:9000</value>
+    </property>
+
+    <!--
+        Hadoop temporary directory.
+        Hadoop stores metadata and temporary runtime files here.
+    -->
+    <property>
+        <name>hadoop.tmp.dir</name>
+        <value>/home/YOUR_USERNAME/hadooptmp</value>
+    </property>
+
+</configuration>

@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hadoop-handler"
+version = "1.0.0"
+description = "Interactive cross-platform control panel for Apache Hadoop 3.4.2 Single-Node clusters"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Aditya Pidurkar", email = "adityapidurkar01@gmail.com" },
+]
+maintainers = [
+    { name = "Aditya Pidurkar", email = "adityapidurkar01@gmail.com" },
+]
+keywords = [
+    "hadoop",
+    "hdfs",
+    "yarn",
+    "cluster",
+    "automation",
+    "cli",
+    "big-data",
+    "single-node",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Unix Shell",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/itsadityapidurkar/hadoop-handler"
+Documentation = "https://github.com/itsadityapidurkar/hadoop-handler#readme"
+Repository = "https://github.com/itsadityapidurkar/hadoop-handler.git"
+Issues = "https://github.com/itsadityapidurkar/hadoop-handler/issues"
+
+[project.scripts]
+hadoop-handler = "hadoop_handler.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hadoop_handler*"]
+
+[tool.setuptools.package-data]
+hadoop_handler = [
+    "scripts/*",
+    "configs/*",
+]
