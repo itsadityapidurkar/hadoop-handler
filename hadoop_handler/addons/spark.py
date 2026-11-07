@@ -22,7 +22,11 @@ from hadoop_handler.core.config import (
     get_default_addon_root,
     get_default_hadoop_home,
 )
-from hadoop_handler.core.downloader import download_file, resolve_apache_url
+from hadoop_handler.core.downloader import (
+    download_file,
+    find_cached_archive,
+    resolve_apache_url,
+)
 from hadoop_handler.core.system import (
     get_active_shell_config,
     register_shell_env,
@@ -72,13 +76,27 @@ class SparkAddon(BaseAddon):
         print(f"  {BCYAN}ACTION: Installing Apache Spark {target_ver}{NC}")
         print(f"{DIVIDER}\n")
 
+        if self.is_installed():
+            inst_ver = self.get_installed_version()
+            if inst_ver == target_ver:
+                print(f"  {GREEN}[✓] Apache Spark {target_ver} is already installed at {self.install_dir}.{NC}")
+                try:
+                    reinst = input("  Do you want to re-install / overwrite? (y/N): ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    return True
+                if reinst.lower() != "y":
+                    print("  Keeping existing installation.")
+                    return True
+
         tar_name = f"spark-{target_ver}-bin-hadoop3.tgz"
         tar_path = DOWNLOADS_DIR / tar_name
         download_url = resolve_apache_url("spark", tar_name, f"spark-{target_ver}")
 
         print(f"  {GRAY}[1/4]{NC} Retrieving Apache Spark {target_ver} archive...")
-        if tar_path.exists() and tar_path.stat().st_size > 10000000:
-            print(f"        {tar_name} already cached in ~/Downloads.")
+        cached_tar = find_cached_archive(tar_name, min_size=50_000_000)
+        if cached_tar:
+            print(f"        Found valid cached archive at {cached_tar} ({cached_tar.stat().st_size / (1024*1024):.1f} MB). Skipping download.")
+            tar_path = cached_tar
         else:
             success = download_file(download_url, tar_path, f"Downloading Apache Spark {target_ver}")
             if not success:

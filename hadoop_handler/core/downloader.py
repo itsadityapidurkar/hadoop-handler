@@ -8,7 +8,37 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from hadoop_handler.core.config import RED, VERSION, YELLOW
+from hadoop_handler.core.config import (
+    CACHE_DIR,
+    DOWNLOADS_DIR,
+    GREEN,
+    NC,
+    RED,
+    USER_HOME,
+    VERSION,
+    YELLOW,
+)
+
+
+def find_cached_archive(filename: str, min_size: int = 50_000_000) -> Optional[Path]:
+    """Search for existing valid cached archive across filesystem to prevent redundant downloads."""
+    search_dirs = [
+        DOWNLOADS_DIR,
+        CACHE_DIR,
+        Path("/tmp"),
+        USER_HOME,
+        Path("/opt"),
+    ]
+    for d in search_dirs:
+        candidate = d / filename
+        if candidate.exists() and candidate.is_file():
+            try:
+                sz = candidate.stat().st_size
+                if sz >= min_size:
+                    return candidate
+            except Exception:
+                pass
+    return None
 
 
 def resolve_apache_url(

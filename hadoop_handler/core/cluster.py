@@ -29,7 +29,11 @@ from hadoop_handler.core.config import (
     get_default_hadoop_home,
     get_default_tmp_dir,
 )
-from hadoop_handler.core.downloader import download_file, resolve_hadoop_url
+from hadoop_handler.core.downloader import (
+    download_file,
+    find_cached_archive,
+    resolve_hadoop_url,
+)
 from hadoop_handler.core.java import check_compatibility, detect_installed_javas, switch_java
 from hadoop_handler.core.system import (
     get_active_shell_config,
@@ -192,6 +196,95 @@ def install_hadoop(version: Optional[str] = None) -> bool:
     selected_ver = selected_ver or "3.4.2"
     print(f"\n  Target Hadoop Version: {GREEN}{selected_ver}{NC}")
 
+    target_home = get_default_hadoop_home()
+    target_data = get_default_data_dir()
+    target_tmp = get_default_tmp_dir()
+
+    # Pre-flight check: is Hadoop already installed on this machine?
+    st = get_cluster_status()
+    if st["is_installed"]:
+        installed_ver = st["hadoop_version"]
+        installed_home = st["hadoop_home"]
+
+        if installed_ver == selected_ver:
+            print(f"\n  {GREEN}[✓] Apache Hadoop {selected_ver} is ALREADY INSTALLED on your system at:{NC}")
+            print(f"      {installed_home}")
+            print("\n  No download or re-installation needed. Choose what you would like to do:")
+            print("    1. Keep existing installation & verify services [Default]")
+            print("    2. Re-configure existing installation (refresh XML configs & Java)")
+            print("    3. Clean re-install (re-download and overwrite)")
+            print("    0. Cancel")
+            try:
+                inst_choice = input("  Select action [1-3, default 1]: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\n  Operation cancelled.")
+                return True
+
+            if inst_choice in ("1", ""):
+                print(f"\n  [+] Preserving existing Apache Hadoop {selected_ver} at {installed_home}.")
+                env_vars = {
+                    "JAVA_HOME": os.environ.get("JAVA_HOME", ""),
+                    "HADOOP_HOME": str(installed_home),
+                    "HADOOP_CONF_DIR": f"{installed_home}/etc/hadoop",
+                    "HADOOP_COMMON_HOME": str(installed_home),
+                    "HADOOP_HDFS_HOME": str(installed_home),
+                    "HADOOP_MAPRED_HOME": str(installed_home),
+                    "YARN_HOME": str(installed_home),
+                    "HADOOP_COMMON_LIB_NATIVE_DIR": f"{installed_home}/lib/native",
+                }
+                register_shell_env(env_vars)
+                for k, v in env_vars.items():
+                    if v:
+                        os.environ[k] = v
+                print(f"  {GREEN}[✓] Environment configured. Verifying cluster status...{NC}\n")
+                verify_hadoop()
+                return True
+            elif inst_choice == "2":
+                print(f"\n  [+] Refreshing configuration for existing Apache Hadoop {selected_ver}...")
+                conf_dir = target_home / "etc/hadoop"
+                conf_dir.mkdir(parents=True, exist_ok=True)
+                for tpl in ["mapred-site.xml", "yarn-site.xml", "workers"]:
+                    src = CONFIGS_DIR / tpl
+                    if src.exists():
+                        shutil.copy2(src, conf_dir / tpl)
+                jvms = detect_installed_javas()
+                active_jvm = next((j for j in jvms if j.is_active), jvms[0]) if jvms else None
+                if active_jvm:
+                    hadoop_env_sh = conf_dir / "hadoop-env.sh"
+                    if hadoop_env_sh.exists():
+                        content = hadoop_env_sh.read_text(encoding="utf-8")
+                        import re
+                        if "export JAVA_HOME=" in content:
+                            content = re.sub(r"^#?\s*export JAVA_HOME=.*$", f"export JAVA_HOME={active_jvm.path}", content, flags=re.MULTILINE)
+                        else:
+                            content += f"\nexport JAVA_HOME={active_jvm.path}\n"
+                        hadoop_env_sh.write_text(content, encoding="utf-8")
+                print(f"  {GREEN}[✓] Configuration refreshed successfully!{NC}\n")
+                verify_hadoop()
+                return True
+            elif inst_choice == "0":
+                print("  Operation cancelled.")
+                return True
+            # if "3", proceed to re-download/re-install
+        else:
+            print(f"\n  {YELLOW}[*] Detected existing Hadoop {installed_ver} installation at {installed_home}.{NC}")
+            print(f"  You requested Hadoop {selected_ver}. To preserve your existing HDFS data blocks,")
+            print("  it is strongly recommended to use In-Place Upgrade rather than a clean install.")
+            print("    1. Switch to In-Place Upgrade (preserves existing HDFS blocks) [Recommended]")
+            print("    2. Clean install (wipes existing Hadoop directory)")
+            print("    0. Cancel")
+            try:
+                mig_choice = input("  Select option [1-2, default 1]: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\n  Operation cancelled.")
+                return True
+
+            if mig_choice in ("1", ""):
+                return upgrade_hadoop(selected_ver)
+            elif mig_choice == "0":
+                print("  Operation cancelled.")
+                return True
+
     # 1. Java Validation
     print(f"\n  {GRAY}[1/8]{NC} Validating Java runtime...")
     jvms = detect_installed_javas()
@@ -212,9 +305,6 @@ def install_hadoop(version: Optional[str] = None) -> bool:
         except (KeyboardInterrupt, EOFError):
             pass
 
-    target_home = get_default_hadoop_home()
-    target_data = get_default_data_dir()
-    target_tmp = get_default_tmp_dir()
     tar_name = f"hadoop-{selected_ver}.tar.gz"
     tar_path = DOWNLOADS_DIR / tar_name
     download_url = resolve_hadoop_url(selected_ver)
@@ -227,12 +317,16 @@ def install_hadoop(version: Optional[str] = None) -> bool:
 
     # 3. Retrieve Tarball
     print(f"\n  {GRAY}[3/8]{NC} Retrieving Apache Hadoop {selected_ver} tarball...")
-    if tar_path.exists() and tar_path.stat().st_size > 1000000:
-        print(f"        {tar_name} already cached in ~/Downloads. Skipping download.")
+    cached_tar = find_cached_archive(tar_name, min_size=100_000_000)
+    if cached_tar:
+        print(f"        Found valid cached archive at {cached_tar} ({cached_tar.stat().st_size / (1024*1024):.1f} MB). Skipping download.")
+        tar_path = cached_tar
     else:
+        if tar_path.exists() and tar_path.stat().st_size < 100_000_000:
+            print(f"        Resuming download of existing archive ({tar_path.stat().st_size / (1024*1024):.1f} MB)...")
         success = download_file(download_url, tar_path, f"Retrieving Apache Hadoop {selected_ver}")
         if not success:
-            if tar_path.exists():
+            if tar_path.exists() and tar_path.stat().st_size < 100_000_000:
                 tar_path.unlink()
             return False
         send_notification("Hadoop Handler", f"Apache Hadoop {selected_ver} downloaded.")
@@ -357,9 +451,14 @@ def install_hadoop(version: Optional[str] = None) -> bool:
         hadoop_env_sh.write_text(content, encoding="utf-8")
 
     # 8. Format NameNode
-    print(f"\n  {GRAY}[8/8]{NC} Formatting HDFS NameNode system...")
-    hdfs_bin = str(target_home / "bin" / ("hdfs.cmd" if IS_WINDOWS else "hdfs"))
-    subprocess.run([hdfs_bin, "namenode", "-format", "-force"], check=False)
+    print(f"\n  {GRAY}[8/8]{NC} Initializing HDFS NameNode storage...")
+    namenode_current = target_data / "namenode" / "current"
+    if namenode_current.exists():
+        print(f"        Existing HDFS metadata detected at {namenode_current}.")
+        print("        Preserving existing data blocks (skipping 'hdfs namenode -format').")
+    else:
+        hdfs_bin = str(target_home / "bin" / ("hdfs.cmd" if IS_WINDOWS else "hdfs"))
+        subprocess.run([hdfs_bin, "namenode", "-format", "-force"], check=False)
 
     print(f"\n  {GREEN}[✓] Installation of Hadoop {selected_ver} completed successfully!{NC}")
     shell_conf = get_active_shell_config()
@@ -414,7 +513,7 @@ def upgrade_hadoop(target_version: Optional[str] = None) -> bool:
             return False
 
     if current_ver == target_ver:
-        print(f"  {YELLOW}[*] Cluster is already running Hadoop {target_ver}.{NC}")
+        print(f"  {YELLOW}[*] Cluster is already running Hadoop {target_ver}. No migration needed.{NC}")
         return True
 
     print(f"\n  Target Hadoop Version: {GREEN}{target_ver}{NC}")
@@ -445,9 +544,17 @@ def upgrade_hadoop(target_version: Optional[str] = None) -> bool:
     print(f"\n  {GRAY}[3/5]{NC} Retrieving Hadoop {target_ver}...")
     tar_name = f"hadoop-{target_ver}.tar.gz"
     tar_path = DOWNLOADS_DIR / tar_name
-    if not tar_path.exists():
+    cached_tar = find_cached_archive(tar_name, min_size=100_000_000)
+    if cached_tar:
+        print(f"        Found valid cached archive at {cached_tar} ({cached_tar.stat().st_size / (1024*1024):.1f} MB). Skipping download.")
+        tar_path = cached_tar
+    else:
+        if tar_path.exists() and tar_path.stat().st_size < 100_000_000:
+            print(f"        Resuming download of existing archive ({tar_path.stat().st_size / (1024*1024):.1f} MB)...")
         download_url = resolve_hadoop_url(target_ver)
         if not download_file(download_url, tar_path, f"Downloading Hadoop {target_ver}"):
+            if tar_path.exists() and tar_path.stat().st_size < 100_000_000:
+                tar_path.unlink()
             return False
 
     # Step 4: Swap Binaries (Preserving HDFS Data Blocks)
