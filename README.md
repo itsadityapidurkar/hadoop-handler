@@ -1,6 +1,6 @@
 # Hadoop Handler
 
-An interactive, cross-platform command-line tool suite designed to automate the installation, configuration, verification, and management of **Apache Hadoop 3.4.2** Single-Node clusters on **Linux**, **macOS**, and **Windows**.
+An interactive, pure Python cross-platform control center and ecosystem addon manager for **Apache Hadoop**, **Apache Spark**, **Apache Hive**, **Apache Kafka**, and **Trino (PrestoSQL)** on **Linux**, **macOS**, and **Windows**.
 
 Developed by **Aditya Pidurkar ([@itsadityap](https://github.com/itsadityapidurkar))**.
 
@@ -27,7 +27,7 @@ You can also run subcommands and flags directly:
 hadoop-handler --version
 hadoop-handler --help
 
-# Direct subcommands
+# Hadoop Cluster Commands
 hadoop-handler verify                 # Verify Hadoop, Java, and running daemons
 hadoop-handler install                # Install Apache Hadoop (defaults to 3.4.2)
 hadoop-handler install --version 3.3.6 # Install specific Hadoop version
@@ -41,6 +41,19 @@ hadoop-handler stop                   # Stop services
 hadoop-handler restart                # Restart cluster daemons
 hadoop-handler diagnose               # Check and repair dependencies
 hadoop-handler delete                 # Wipe and uninstall cluster
+
+# Ecosystem Addon Commands (Spark, Hive, Kafka, Trino)
+hadoop-handler addon list             # List installed and available ecosystem addons
+hadoop-handler addon install spark    # Install Apache Spark with HDFS & YARN integration
+hadoop-handler addon install hive     # Install Apache Hive data warehouse with Derby metastore
+hadoop-handler addon install kafka    # Install Apache Kafka in lightweight KRaft mode
+hadoop-handler addon install trino    # Install Trino SQL query engine with Hive connector
+hadoop-handler addon status spark     # Check status and open ports for addon
+hadoop-handler addon start spark      # Start addon services
+hadoop-handler addon stop spark       # Stop addon services
+hadoop-handler addon remove spark     # Remove addon and clean environment
+
+# System & Shell Integration
 hadoop-handler service enable         # Register cluster as systemd user service
 hadoop-handler service status         # Check systemd service status
 hadoop-handler update                 # In-place self update via git or pip
@@ -81,13 +94,19 @@ chmod +x setup.sh
 
 ## Features & Menu Overview
 
-* **Arrow-Key Navigation (TUI Menu):** Navigate menu items effortlessly with `Up` / `Down` arrow keys, Vim keys (`j` / `k`), direct numbers (`0-13`), or `Enter` to select. Zero-flicker in-place terminal redraw.
+* **Pure Python Native Core:** Built completely on the Python 3 standard library with zero third-party pip dependencies. Eliminates shell script divergence across Linux, macOS, and Windows.
+* **Ecosystem Addon Manager:** Automated installation, configuration, daemon supervision, and HDFS/YARN integration for major big data frameworks:
+  * **Apache Spark:** Fast in-memory analytics engine with native HDFS classpath and YARN execution.
+  * **Apache Hive:** Distributed data warehouse with Derby/HDFS metastore and automatic Guava conflict resolution.
+  * **Apache Kafka:** Distributed streaming platform initialized in modern, lightweight KRaft mode (no ZooKeeper needed).
+  * **Trino (PrestoSQL):** Interactive distributed SQL engine with built-in Hive connector querying HDFS datasets.
+* **Arrow-Key Navigation (TUI Menu):** Navigate menu items effortlessly with `Up` / `Down` arrow keys, Vim keys (`j` / `k`), direct numbers (`0-14`), or `Enter` to select. Zero-flicker in-place terminal redraw.
 * **Live Visual Status Badges:** Instant status display at the top of the menu:
   * Hadoop: `[Installed (3.4.2)]` or `[Not Installed]`
   * Java: `[OpenJDK 21]` or `[Missing]`
   * Services: `[5/5 Daemons Running]` or `[Stopped]`
 * **Dynamic Hadoop Version Selector:** Choose from modern versions (3.4.2, 3.4.1, 3.3.6, 3.3.5, 3.2.4) or provide a custom version during installation with automatic pre-flight compatibility checks.
-* **Java Runtime Detection & Switcher:** Detects all installed JDKs across standard system directories (`/usr/lib/jvm/`, macOS JVM paths) and enables instant active JVM switching for Hadoop (`hadoop-handler java list`, `hadoop-handler java switch`, `hadoop-handler java use <ver>`).
+* **Java Runtime Detection & Switcher:** Detects all installed JDKs across standard system directories (`/usr/lib/jvm/`, macOS JVM paths, Windows paths) and enables instant active JVM switching for Hadoop (`hadoop-handler java list`, `hadoop-handler java switch`, `hadoop-handler java use <ver>`).
 * **Cross-Compatibility Matrix Checker:** Comprehensive matrix checker preventing common JVM reflection and security manager crashes across Hadoop 3.4+, 3.3.x, 3.2.x, and 2.x on Java 8, 11, 17, and 21 (`hadoop-handler check-compat`).
 * **In-Place Upgrades & Downgrades:** Upgrade or downgrade Hadoop versions in-place (`hadoop-handler upgrade [version]`) while preserving existing XML configurations and protecting HDFS data blocks from reformatting.
 * **Smooth Download Progress Bar:** Live, single-line progress indicator with byte counter, download rate (MB/s), and ETA calculation.
@@ -103,29 +122,43 @@ chmod +x setup.sh
 
 ## Windows Daemon Management
 
-On Windows, open a Command Prompt (CMD) as Administrator and run:
-- Start HDFS: `start-dfs.cmd`
-- Start YARN: `start-yarn.cmd`
-- Stop services: `stop-all.cmd` or close the daemon windows.
+On Windows, open a Command Prompt (CMD) or PowerShell and run:
+- Start HDFS: `hadoop-handler start`
+- Stop services: `hadoop-handler stop`
+- Check status: `hadoop-handler verify`
 
 ---
 
 ## Repository Structure
 
-- `hadoop_handler/`: The core Python package with cross-platform CLI runner and templates.
-  - `cli.py`: Platform-aware launcher for Linux, macOS, and Windows.
-  - `scripts/`: Embedded shell scripts (`hadoop-handler`, `install.ps1`).
+- `hadoop_handler/`: The core Python package.
+  - `cli.py`: Platform-agnostic CLI dispatcher and entry point.
+  - `core/`: Core cluster engine and system utilities.
+    - `config.py`: Cluster paths, platform constants, and default directories.
+    - `system.py`: OS operations, service unit generators, notifications, completions.
+    - `downloader.py`: Streaming downloader with live progress bar and mirror fallback.
+    - `java.py`: Multi-JDK detection, switcher, and compatibility matrix.
+    - `cluster.py`: Hadoop installation, in-place upgrade, daemons, and diagnostics.
+    - `tui.py`: Zero-flicker arrow-key menu selector and live badges.
+  - `addons/`: Big data ecosystem addon suite.
+    - `base.py`: Base class defining addon lifecycle.
+    - `manager.py`: Registry and interactive management submenu.
+    - `spark.py`: Apache Spark integration with HDFS/YARN.
+    - `hive.py`: Apache Hive data warehouse and Derby metastore.
+    - `kafka.py`: Apache Kafka in KRaft mode.
+    - `trino.py`: Trino (PrestoSQL) distributed query engine.
   - `configs/`: Pre-configured XML templates (`core-site.xml`, `hdfs-site.xml`, `mapred-site.xml`, `yarn-site.xml`, `workers`).
 - `pyproject.toml`: Modern PEP 517/621 build configuration for PyPI.
 - `setup.sh`: Global setup script for Unix systems.
 - `install.sh`: One-liner bootstrap script for Unix systems.
-- `install.ps1`: Native PowerShell installer for Windows.
-- `configs/`: Fallback cluster templates.
+- `install.ps1`: Native PowerShell launcher for Windows.
 
 ---
 
-## Roadmap / Upcoming Features (TODO)
+## Roadmap / Completed Features
 
+- [x] **Pure Python Native Core**: Unified standard-library engine deprecating shell script divergence across Linux, macOS, and Windows.
+- [x] **Ecosystem Addon Manager**: Full lifecycle management (install, start, stop, status, remove) for Apache Spark, Apache Hive, Apache Kafka, and Trino (PrestoSQL).
 - [x] **Arrow-Key Navigation (TUI Menu)**: Interactive navigation with live cluster status badges.
 - [x] **Smooth Download Progress Bar**: Single-line progress bar with transfer rate and ETA.
 - [x] **Desktop Notifications**: Native desktop alerts for task completion.
