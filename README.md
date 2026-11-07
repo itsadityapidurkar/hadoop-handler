@@ -6,7 +6,7 @@ Developed by **Aditya Pidurkar ([@itsadityap](https://github.com/itsadityapidurk
 
 ---
 
-## 🚀 Installation & Usage
+## Installation & Usage
 
 ### Method 1: Install via Pip / PyPI (Recommended)
 
@@ -102,7 +102,7 @@ On Windows, open a Command Prompt (CMD) as Administrator and run:
 
 ---
 
-## 🗺️ Roadmap / Upcoming Features (TODO)
+## Roadmap / Upcoming Features (TODO)
 
 - [ ] **Self-Updater**: One-command in-place CLI updates (`hadoop-handler self-update`) and PyPI version update notifications.
 - [ ] **Desktop Notifications**: Native desktop alerts (Linux `notify-send`, macOS notification center, Windows toast) when large downloads or cluster operations complete.
