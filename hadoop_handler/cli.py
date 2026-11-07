@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = PACKAGE_DIR / "scripts"
@@ -25,18 +25,22 @@ Usage:
   hadoop-handler [COMMAND] [OPTIONS]
 
 Commands:
-  (no args)   Launch interactive control center menu
-  diagnose    Diagnose and repair system dependencies
-  install     Install and configure Apache Hadoop 3.4.2
-  verify      Verify Hadoop & Java installation status and daemons
-  status      Alias for 'verify'
-  start       Start HDFS and YARN daemons
-  stop        Stop HDFS and YARN daemons
-  delete      Remove Hadoop cluster and related directories
+  (no args)             Launch interactive TUI control panel (with arrow-key navigation)
+  diagnose              Diagnose and repair system dependencies
+  install               Install and configure Apache Hadoop 3.4.2
+  verify, status        Verify Hadoop & Java installation status and daemons
+  start                 Start HDFS and YARN daemons
+  stop                  Stop HDFS and YARN daemons
+  restart               Restart all cluster daemons
+  delete                Remove Hadoop cluster and related directories
+  service <action>      Manage systemd user service (enable|disable|status|start|stop)
+  update                Check and perform in-place self-update
+  completion <shell>    Generate autocompletion script (bash|zsh|fish|powershell)
+  --install-completion  Automatically register autocompletion in active shell
 
 Options:
-  -v, --version   Show version and exit
-  -h, --help      Show this help message and exit
+  -v, --version         Show version and exit
+  -h, --help            Show this help message and exit
 
 Online Documentation:
   https://github.com/itsadityapidurkar/hadoop-handler

@@ -28,12 +28,17 @@ hadoop-handler --version
 hadoop-handler --help
 
 # Direct subcommands
-hadoop-handler verify      # Verify Hadoop, Java, and running daemons
-hadoop-handler start       # Start HDFS and YARN daemons
-hadoop-handler stop        # Stop services
-hadoop-handler diagnose    # Check and repair dependencies
-hadoop-handler install     # Run automated installation
-hadoop-handler delete      # Wipe and uninstall cluster
+hadoop-handler verify                 # Verify Hadoop, Java, and running daemons
+hadoop-handler start                  # Start HDFS and YARN daemons
+hadoop-handler stop                   # Stop services
+hadoop-handler restart                # Restart cluster daemons
+hadoop-handler diagnose               # Check and repair dependencies
+hadoop-handler install                # Run automated installation with smooth progress
+hadoop-handler delete                 # Wipe and uninstall cluster
+hadoop-handler service enable         # Register cluster as systemd user service
+hadoop-handler service status         # Check systemd service status
+hadoop-handler update                 # In-place self update via git or pip
+hadoop-handler --install-completion   # Install shell autocompletion (bash, zsh, fish, powershell)
 ```
 
 ---
@@ -68,14 +73,21 @@ chmod +x setup.sh
 
 ---
 
-## Menu Features
+## Features & Menu Overview
 
-0. **Diagnose/Repair System Dependencies:** Automatically detects missing utilities (tar, curl, OpenJDK, etc.) and safely installs them using your native package manager.
-1. **Install Hadoop:** Auto-installs Java 21, securely downloads and extracts Hadoop 3.4.2 (with resume capabilities), generates passwordless SSH keys, configures firewall ports, formats the NameNode, and configures paths. Installations are fully idempotent (re-running will not wipe your HDFS data blocks).
-2. **Verify Hadoop Installation:** Checks environment variables, checks commands (`hadoop`, `java`), and lists active daemons.
-3. **Start Hadoop Services:** Automatically starts HDFS (dfs) and YARN services.
-4. **Stop Hadoop Services:** Stops YARN resources and HDFS services.
-5. **Delete Hadoop Completely:** Stops services, cleans up all Hadoop binaries, HDFS directories, and environment variables.
+* **Arrow-Key Navigation (TUI Menu):** Navigate menu items effortlessly with `Up` / `Down` arrow keys, Vim keys (`j` / `k`), direct numbers (`0-9`), or `Enter` to select.
+* **Live Visual Status Badges:** Instant status display at the top of the menu:
+  * Hadoop: `[Installed (3.4.2)]` or `[Not Installed]`
+  * Java: `[OpenJDK 21]` or `[Missing]`
+  * Services: `[5/5 Daemons Running]` or `[Stopped]`
+* **Smooth Download Progress Bar:** Live, single-line progress indicator with byte counter, download rate (MB/s), and ETA calculation.
+* **Desktop Notifications:** Native desktop alerts via `notify-send` (Linux), Notification Center (macOS), or Toast (Windows) when downloads and cluster tasks complete.
+* **System Service Integration (systemd / launchd):** Manage Hadoop daemons via `systemctl --user` on Linux or `launchd` on macOS so services can run automatically on boot.
+* **Shell Autocompletion:** Native autocompletion support for `bash`, `zsh`, `fish`, and `powershell`.
+* **One-Command Self-Update:** Run `hadoop-handler update` to automatically pull updates from PyPI or git repositories.
+* **Version Update Banner:** Non-intrusive cached checks alerting you when a newer version is available.
+* **Diagnose / Auto-Repair:** Scans for missing utilities (`curl`, `tar`, `rsync`, OpenJDK 21, `sshd`) and safely installs them using your native package manager (`apt`, `dnf`, `yum`, `pacman`, `brew`).
+* **Idempotent Installation:** Secure downloads, SSH keypair generation, firewall port configuration, and safe NameNode formatting without wiping existing HDFS data blocks.
 
 ---
 
@@ -104,10 +116,14 @@ On Windows, open a Command Prompt (CMD) as Administrator and run:
 
 ## Roadmap / Upcoming Features (TODO)
 
-- [ ] **Self-Updater**: One-command in-place CLI updates (`hadoop-handler self-update`) and PyPI version update notifications.
-- [ ] **Desktop Notifications**: Native desktop alerts (Linux `notify-send`, macOS notification center, Windows toast) when large downloads or cluster operations complete.
+- [x] **Arrow-Key Navigation (TUI Menu)**: Interactive navigation with live cluster status badges.
+- [x] **Smooth Download Progress Bar**: Single-line progress bar with transfer rate and ETA.
+- [x] **Desktop Notifications**: Native desktop alerts for task completion.
+- [x] **System Service Integration**: Manage cluster via systemd user units on Linux or launchd on macOS.
+- [x] **Shell Autocompletion**: Subcommand autocompletion for Bash, Zsh, Fish, and PowerShell.
+- [x] **One-Command Self-Update**: In-place CLI updates (`hadoop-handler update`) and update check banner.
 - [ ] **Multiple Hadoop Version Support**: Side-by-side installations of multiple Hadoop versions (e.g. 3.3.6, 3.4.1, 3.4.2) with instant switching (`hadoop-handler use <version>`).
-- [ ] **Cross-Compatibility Checker**: Automated verification of Hadoop $\leftrightarrow$ Java runtime matrix to prevent JVM incompatibilities and JPMS reflection crashes.
+- [ ] **Cross-Compatibility Checker**: Automated verification of Hadoop and Java runtime matrix to prevent JVM reflection crashes.
 - [ ] **In-Place Upgrades & Downgrades**: Upgrade or downgrade Hadoop versions seamlessly while preserving XML configurations and existing HDFS data blocks.
 
 ---
@@ -115,4 +131,3 @@ On Windows, open a Command Prompt (CMD) as Administrator and run:
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
-

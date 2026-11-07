@@ -5,6 +5,8 @@
 #  Developer: Aditya Pidurkar (github.com/itsadityapidurkar)
 # ==============================================================================
 
+CURRENT_VERSION="1.1.0"
+
 # Colors for terminal output
 RED='\033[0;31m'
 BRED='\033[1;31m'
@@ -30,6 +32,136 @@ while [ -h "$TARGET_FILE" ]; do
     [[ "$TARGET_FILE" != /* ]] && TARGET_FILE="$DIR/$TARGET_FILE"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$TARGET_FILE")" && pwd)"
+
+# Send native desktop notification
+send_notification() {
+    local title="$1"
+    local message="$2"
+    if [ "$OS_NAME" = "Linux" ] && command -v notify-send >/dev/null 2>&1; then
+        notify-send "$title" "$message" 2>/dev/null || true
+    elif [ "$OS_NAME" = "Darwin" ]; then
+        osascript -e "display notification \"$message\" with title \"$title\"" 2>/dev/null || true
+    fi
+}
+
+# Smooth download progress with Python or curl fallback
+download_file() {
+    local url="$1"
+    local dest="$2"
+    local title="${3:-Downloading}"
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - << EOF
+import os, sys, time, urllib.request
+
+url = "$url"
+dest = "$dest"
+title = "$title"
+
+headers = {'User-Agent': 'Hadoop-Handler/$CURRENT_VERSION'}
+resume_byte_pos = 0
+if os.path.exists(dest):
+    resume_byte_pos = os.path.getsize(dest)
+
+req = urllib.request.Request(url, headers=headers)
+if resume_byte_pos > 0:
+    req.add_header("Range", f"bytes={resume_byte_pos}-")
+
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        content_length = resp.headers.get('Content-Length')
+        if resp.status == 206:
+            total_size = resume_byte_pos + int(content_length) if content_length else 0
+            mode = 'ab'
+            downloaded = resume_byte_pos
+        else:
+            total_size = int(content_length) if content_length else 0
+            mode = 'wb'
+            downloaded = 0
+
+        start_time = time.time()
+        chunk_size = 131072 # 128 KB
+        bar_width = 24
+
+        print(f"        {title}...")
+        with open(dest, mode) as f:
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                elapsed = time.time() - start_time
+                speed = (downloaded - resume_byte_pos) / elapsed if elapsed > 0 else 0
+
+                if total_size > 0:
+                    pct = min(100.0, (downloaded / total_size) * 100)
+                    filled = int(bar_width * downloaded // total_size)
+                    bar = '█' * filled + '░' * (bar_width - filled)
+                    eta = (total_size - downloaded) / speed if speed > 0 else 0
+                    eta_str = f"{int(eta // 60):02d}:{int(eta % 60):02d}"
+                    sys.stdout.write(f"\r        [{bar}] {pct:5.1f}% ({downloaded/(1024*1024):.1f}/{total_size/(1024*1024):.1f} MB) {speed/(1024*1024):.1f} MB/s ETA {eta_str}")
+                else:
+                    sys.stdout.write(f"\r        Downloaded: {downloaded/(1024*1024):.1f} MB ({speed/(1024*1024):.1f} MB/s)")
+                sys.stdout.flush()
+        print()
+    sys.exit(0)
+except Exception as e:
+    sys.stderr.write(f"\n        [!] Python download interrupted ({e}), falling back to curl...\n")
+    sys.exit(1)
+EOF
+        if [ $? -eq 0 ] && [ -s "$dest" ]; then
+            return 0
+        fi
+    fi
+
+    # Fallback to curl with progress bar
+    if command -v curl >/dev/null 2>&1; then
+        echo -e "        Downloading via curl (progress bar enabled)..."
+        curl -# -L -C - -o "$dest" "$url"
+        return $?
+    elif command -v wget >/dev/null 2>&1; then
+        wget --progress=bar:force -c -O "$dest" "$url"
+        return $?
+    else
+        echo -e "  ${RED}[!] Neither python3, curl, nor wget found.${NC}"
+        return 1
+    fi
+}
+
+# Check PyPI / GitHub for newer releases and display non-intrusive banner
+check_version_banner() {
+    local cache_file="$HOME/.hadoop-handler/.version_cache"
+    local now=$(date +%s)
+    local last_check=0
+
+    mkdir -p "$HOME/.hadoop-handler" 2>/dev/null || true
+    if [ -f "$cache_file" ]; then
+        last_check=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
+    fi
+
+    # Check at most once every 12 hours (43200 seconds) in the background
+    if [ $((now - last_check)) -gt 43200 ]; then
+        (
+            local latest=$(curl -s --max-time 1.5 https://api.github.com/repos/itsadityapidurkar/hadoop-handler/releases/latest 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/' || echo "")
+            if [ -n "$latest" ]; then
+                echo "$latest" > "$cache_file"
+            else
+                latest=$(curl -s --max-time 1.5 https://pypi.org/pypi/hadoop-handler/json 2>/dev/null | grep -o '"version":"[^"]*"' | head -n 1 | cut -d'"' -f4 || echo "")
+                [ -n "$latest" ] && echo "$latest" > "$cache_file"
+            fi
+        ) 2>/dev/null &
+    fi
+
+    if [ -f "$cache_file" ]; then
+        local remote_ver=$(cat "$cache_file" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$remote_ver" ] && [ "$remote_ver" != "$CURRENT_VERSION" ]; then
+            echo -e "  ${YELLOW}* Note: Update available: ${CURRENT_VERSION} -> ${remote_ver}.${NC}"
+            echo -e "    Run ${CYAN}hadoop-handler update${NC} to upgrade."
+            echo -e "$DIVIDER"
+        fi
+    fi
+}
 
 # Load environment variables dynamically within the script execution context
 load_env() {
@@ -63,7 +195,7 @@ load_env() {
 pause_screen() {
     echo -e "\n$DIVIDER"
     echo -ne "  ${YELLOW}Press [Enter] to return to the main menu...${NC}"
-    read
+    read -r
 }
 
 # 1. Install Hadoop
@@ -118,34 +250,27 @@ install_hadoop() {
         fi
     fi
 
-    # Detect JAVA_HOME
+    # Determine Java Home dynamically
+    DETECTED_JAVA_HOME=""
     if [ "$OS_NAME" = "Linux" ]; then
         DETECTED_JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
     elif [ "$OS_NAME" = "Darwin" ]; then
         DETECTED_JAVA_HOME=$(/usr/libexec/java_home -v 21)
     fi
-    echo -e "        JAVA_HOME resolved to: ${CYAN}${DETECTED_JAVA_HOME}${NC}"
+    echo -e "        Detected JAVA_HOME: ${GREEN}${DETECTED_JAVA_HOME}${NC}"
 
-    # Set Directories and Handle Spaces
+    # Target Locations
+    HADOOP_DEST="/opt/hadoop"
+    HADOOP_DATA_DIR="/opt/hadoop_data"
+    HADOOP_TMP_DIR="/opt/hadoop_tmp"
     HADOOP_TAR="hadoop-3.4.2.tar.gz"
     DOWNLOAD_URL="https://archive.apache.org/dist/hadoop/common/hadoop-3.4.2/${HADOOP_TAR}"
 
-    if [ "$OS_NAME" = "Linux" ]; then
-        HADOOP_DEST="/opt/hadoop"
+    if [ "$OS_NAME" = "Darwin" ]; then
         if [[ "$HOME" == *" "* ]]; then
-            echo -e "        ${YELLOW}[!] Warning: Home path contains spaces. Redirecting storage to /opt/...${NC}"
-            HADOOP_DATA_DIR="/opt/hadoopdata"
-            HADOOP_TMP_DIR="/opt/hadooptmp"
-        else
-            HADOOP_DATA_DIR="$HOME/hadoopdata"
-            HADOOP_TMP_DIR="$HOME/hadooptmp"
-        fi
-    else # macOS
-        if [[ "$HOME" == *" "* ]]; then
-            echo -e "        ${YELLOW}[!] Warning: Home path contains spaces. Redirecting installation to /Users/Shared/...${NC}"
             HADOOP_DEST="/Users/Shared/hadoop"
-            HADOOP_DATA_DIR="/Users/Shared/hadoopdata"
-            HADOOP_TMP_DIR="/Users/Shared/hadooptmp"
+            HADOOP_DATA_DIR="/Users/Shared/hadoop_data"
+            HADOOP_TMP_DIR="/Users/Shared/hadoop_tmp"
         else
             HADOOP_DEST="$HOME/hadoop"
             HADOOP_DATA_DIR="$HOME/hadoopdata"
@@ -167,20 +292,17 @@ install_hadoop() {
         mkdir -p "${HADOOP_TMP_DIR}"
     fi
 
-    # Download Hadoop 3.4.2
+    # Download Hadoop 3.4.2 with smooth progress bar
     echo -e "\n  ${GRAY}[3/8]${NC} Retrieving Apache Hadoop 3.4.2 tarball..."
     if [ -f "$HOME/Downloads/${HADOOP_TAR}" ]; then
         echo -e "        ${HADOOP_TAR} already cached in ~/Downloads. Skipping download."
     else
-        echo -e "        Downloading from official Apache archive..."
-        if command -v wget >/dev/null 2>&1; then
-            wget -P "$HOME/Downloads" "${DOWNLOAD_URL}" || { echo -e "  ${RED}[!] Download failed.${NC}"; rm -f "$HOME/Downloads/${HADOOP_TAR}"; return 1; }
-        elif command -v curl >/dev/null 2>&1; then
-            curl -L -o "$HOME/Downloads/${HADOOP_TAR}" "${DOWNLOAD_URL}" || { echo -e "  ${RED}[!] Download failed.${NC}"; rm -f "$HOME/Downloads/${HADOOP_TAR}"; return 1; }
-        else
-            echo -e "  ${RED}[!] Neither 'wget' nor 'curl' found. Please install one of them to proceed.${NC}"
+        download_file "${DOWNLOAD_URL}" "$HOME/Downloads/${HADOOP_TAR}" "Retrieving Apache Hadoop 3.4.2 tarball" || {
+            echo -e "  ${RED}[!] Download failed.${NC}"
+            rm -f "$HOME/Downloads/${HADOOP_TAR}"
             return 1
-        fi
+        }
+        send_notification "Hadoop Handler" "Apache Hadoop 3.4.2 tarball downloaded successfully."
     fi
 
     # Extract and Install
@@ -207,6 +329,7 @@ install_hadoop() {
         fi
     fi
     echo -e "        Extraction completed successfully."
+    send_notification "Hadoop Handler" "Apache Hadoop 3.4.2 binaries extracted."
 
     # Configure SSH
     echo -e "\n  ${GRAY}[5/8]${NC} Configuring passwordless SSH keys..."
@@ -241,11 +364,11 @@ install_hadoop() {
         SHELL_CONFIG="$HOME/.bashrc"
     fi
 
-    ENV_MARKER="# HADOOP ENV CONFIG"
-    if grep -q "$ENV_MARKER" "$SHELL_CONFIG" 2>/dev/null; then
-        echo -e "        Environment profile already configured in ${SHELL_CONFIG}."
+    ENV_MARKER="# --- HADOOP HANDLER ENVIRONMENT VARIABLES ---"
+    if grep -q "$ENV_MARKER" "${SHELL_CONFIG}" 2>/dev/null; then
+        echo -e "        Environment variables already present in ${SHELL_CONFIG}. Skipping duplicate entry."
     else
-        cat << EOF >> "$SHELL_CONFIG"
+        cat << EOF >> "${SHELL_CONFIG}"
 
 $ENV_MARKER
 export JAVA_HOME="${DETECTED_JAVA_HOME}"
@@ -311,14 +434,17 @@ EOF
     </property>
     <property>
         <name>dfs.namenode.name.dir</name>
-        <value>${HADOOP_DATA_DIR}/namenode</value>
+        <value>file://${HADOOP_DATA_DIR}/namenode</value>
     </property>
     <property>
         <name>dfs.datanode.data.dir</name>
-        <value>${HADOOP_DATA_DIR}/datanode</value>
+        <value>file://${HADOOP_DATA_DIR}/datanode</value>
     </property>
 </configuration>
 EOF
+
+        # workers
+        echo "localhost" > "${CONF_DIR}/workers"
 
         # mapred-site.xml
         cat << EOF > "${CONF_DIR}/mapred-site.xml"
@@ -367,6 +493,7 @@ EOF
     echo -e "\n  ${GREEN}[✓] Installation completed successfully!${NC}"
     echo -e "      Please reload your shell profile to apply variables globally:"
     echo -e "      ${YELLOW}source ${SHELL_CONFIG}${NC}"
+    send_notification "Hadoop Handler" "Hadoop installation and NameNode format finished."
 }
 
 # 2. Verify Hadoop Installation
@@ -411,7 +538,7 @@ start_services() {
     clear
     load_env
     echo -e "$DIVIDER"
-    echo -e "  ${BCYAN}ACTION: Starting Hadoop Services (HDFS & YARN)$NC"
+    echo -e "  ${BCYAN}ACTION: Starting Hadoop Services (HDFS & YARN)${NC}"
     echo -e "$DIVIDER\n"
     
     if [ -z "$HADOOP_HOME" ] || [ ! -d "$HADOOP_HOME" ]; then
@@ -440,6 +567,7 @@ start_services() {
     if command -v jps >/dev/null 2>&1; then
         jps | sed 's/^/  /'
     fi
+    send_notification "Hadoop Handler" "Hadoop cluster services (HDFS & YARN) started."
 }
 
 # 4. Stop Hadoop Services
@@ -447,7 +575,7 @@ stop_services() {
     clear
     load_env
     echo -e "$DIVIDER"
-    echo -e "  ${BCYAN}ACTION: Stopping Hadoop Services (YARN & HDFS)$NC"
+    echo -e "  ${BCYAN}ACTION: Stopping Hadoop Services (YARN & HDFS)${NC}"
     echo -e "$DIVIDER\n"
     
     if [ -z "$HADOOP_HOME" ] || [ ! -d "$HADOOP_HOME" ]; then
@@ -476,6 +604,7 @@ stop_services() {
     if command -v jps >/dev/null 2>&1; then
         jps | sed 's/^/  /'
     fi
+    send_notification "Hadoop Handler" "Hadoop cluster services stopped."
 }
 
 # 5. Delete Hadoop Completely
@@ -498,142 +627,467 @@ delete_hadoop() {
         echo -e "\n  ${GRAY}[1/3]${NC} Deleting binaries and directories..."
         if [ -d "$HADOOP_HOME" ]; then
             if [ "$OS_NAME" = "Linux" ]; then
-                sudo rm -rf "$HADOOP_HOME"
+                sudo rm -rf "$HADOOP_HOME" /opt/hadoop_data /opt/hadoop_tmp
             else
-                rm -rf "$HADOOP_HOME"
+                rm -rf "$HADOOP_HOME" ~/hadoopdata ~/hadooptmp /Users/Shared/hadoop /Users/Shared/hadoop_data /Users/Shared/hadoop_tmp
             fi
+            echo -e "        Deleted ${HADOOP_HOME} and data directories."
         fi
-        
-        echo -e "  ${GRAY}[2/3]${NC} Deleting local HDFS storage & tmp blocks..."
-        rm -rf ~/hadoopdata
-        rm -rf ~/hadooptmp
-        rm -rf /Users/Shared/hadoopdata 2>/dev/null || true
-        rm -rf /Users/Shared/hadooptmp 2>/dev/null || true
-        
-        # Remove environment variables from shell profile
-        echo -e "  ${GRAY}[3/3]${NC} Cleaning system environment profile..."
-        SHELL_CONFIG=""
-        if [[ "$SHELL" == */zsh ]]; then
-            SHELL_CONFIG="$HOME/.zshrc"
-        else
-            SHELL_CONFIG="$HOME/.bashrc"
-        fi
-        
-        if [ -f "$SHELL_CONFIG" ]; then
-            sed -i.bak '/# HADOOP ENV CONFIG/,/export PATH=.*sbin/d' "$SHELL_CONFIG" || \
-            sed -i "" '/# HADOOP ENV CONFIG/,/export PATH=.*sbin/d' "$SHELL_CONFIG"
-            rm -f "${SHELL_CONFIG}.bak"
-        fi
-        
-        # Clear local environment variables
-        export HADOOP_HOME=""
-        export HADOOP_CONF_DIR=""
-        
+
+        echo -e "\n  ${GRAY}[2/3]${NC} Removing downloaded archives..."
+        rm -f "$HOME/Downloads/hadoop-3.4.2.tar.gz"
+        echo -e "        Removed tarball cache."
+
+        echo -e "\n  ${GRAY}[3/3]${NC} Cleaning up environment variables..."
+        for profile in "$HOME/.bashrc" "$HOME/.zshrc"; do
+            if [ -f "$profile" ]; then
+                sed -i.bak '/# --- HADOOP HANDLER ENVIRONMENT VARIABLES ---/,/export PATH=.*HADOOP/d' "$profile" 2>/dev/null || \
+                sed -i '' '/# --- HADOOP HANDLER ENVIRONMENT VARIABLES ---/,/export PATH=.*HADOOP/d' "$profile" 2>/dev/null
+                rm -f "${profile}.bak"
+                echo -e "        Cleaned environment variables from ${profile}."
+            fi
+        done
+
+        # Reset session variables
+        unset HADOOP_HOME
+        unset HADOOP_CONF_DIR
+        unset HADOOP_COMMON_HOME
+        unset HADOOP_HDFS_HOME
+        unset HADOOP_MAPRED_HOME
+        unset YARN_HOME
+        unset HADOOP_COMMON_LIB_NATIVE_DIR
+
         echo -e "\n  ${GREEN}[✓] Uninstall completed. Please reload your shell profile:${NC}"
-        echo -e "      ${YELLOW}source ${SHELL_CONFIG}${NC}"
+        echo -e "      ${YELLOW}source ~/.bashrc${NC} (or ${YELLOW}source ~/.zshrc${NC})"
+        send_notification "Hadoop Handler" "Hadoop installation uninstalled."
     else
-        echo -e "      Uninstall cancelled."
+        echo -e "  ${YELLOW}Uninstall aborted.${NC}"
     fi
 }
 
+# 6. System Service Integration (systemd / launchd)
+manage_system_service() {
+    local action="$1"
+    
+    if [ "$OS_NAME" = "Linux" ]; then
+        local unit_dir="$HOME/.config/systemd/user"
+        local unit_file="${unit_dir}/hadoop.service"
+        local hadoop_bin="$(command -v hadoop-handler 2>/dev/null || echo "${SCRIPT_DIR}/hadoop-handler")"
+        
+        if [ -z "$action" ]; then
+            clear
+            echo -e "$DIVIDER"
+            echo -e "  ${BCYAN}ACTION: System Service Integration (systemd)${NC}"
+            echo -e "$DIVIDER"
+            echo -e "  1. Enable Hadoop service on boot/login (systemd user unit)"
+            echo -e "  2. Disable Hadoop service"
+            echo -e "  3. View service status (systemctl --user status hadoop)"
+            echo -e "  4. Start service via systemctl"
+            echo -e "  5. Stop service via systemctl"
+            echo -e "  6. Back to main menu"
+            echo -e "$DIVIDER"
+            read -p "  Select action [1-6]: " svc_choice
+            case "$svc_choice" in
+                1) action="enable" ;;
+                2) action="disable" ;;
+                3) action="status" ;;
+                4) action="start" ;;
+                5) action="stop" ;;
+                *) return 0 ;;
+            esac
+        fi
+        
+        case "$action" in
+            enable)
+                echo -e "  [+] Generating user systemd unit: ${unit_file}..."
+                mkdir -p "$unit_dir"
+                cat << EOF > "$unit_file"
+[Unit]
+Description=Apache Hadoop Single-Node Services (HDFS & YARN)
+After=network.target
 
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="HADOOP_HOME=${HADOOP_HOME:-/opt/hadoop}"
+Environment="JAVA_HOME=${JAVA_HOME}"
+ExecStart=${hadoop_bin} start
+ExecStop=${hadoop_bin} stop
+
+[Install]
+WantedBy=default.target
+EOF
+                systemctl --user daemon-reload
+                systemctl --user enable hadoop.service
+                echo -e "  ${GREEN}[✓] Hadoop service enabled!${NC}"
+                echo -e "      Hadoop services will now automatically launch on user login."
+                send_notification "Hadoop Handler" "Hadoop systemd user service enabled."
+                ;;
+            disable)
+                echo -e "  [+] Disabling Hadoop systemd service..."
+                systemctl --user stop hadoop.service 2>/dev/null || true
+                systemctl --user disable hadoop.service 2>/dev/null || true
+                rm -f "$unit_file"
+                systemctl --user daemon-reload
+                echo -e "  ${GREEN}[✓] Hadoop systemd service disabled and unit removed.${NC}"
+                send_notification "Hadoop Handler" "Hadoop systemd service disabled."
+                ;;
+            status)
+                systemctl --user status hadoop.service --no-pager
+                ;;
+            start)
+                echo -e "  [+] Starting hadoop.service via systemctl..."
+                systemctl --user start hadoop.service
+                echo -e "  ${GREEN}[✓] Signal dispatched to systemd.${NC}"
+                ;;
+            stop)
+                echo -e "  [+] Stopping hadoop.service via systemctl..."
+                systemctl --user stop hadoop.service
+                echo -e "  ${GREEN}[✓] Signal dispatched to systemd.${NC}"
+                ;;
+            *)
+                echo -e "  ${RED}[!] Unknown service action: ${action}${NC}"
+                echo -e "      Supported: enable, disable, status, start, stop"
+                ;;
+        esac
+    elif [ "$OS_NAME" = "Darwin" ]; then
+        local plist_dir="$HOME/Library/LaunchAgents"
+        local plist_file="${plist_dir}/in.adityapidurkar.hadoop.plist"
+        local hadoop_bin="$(command -v hadoop-handler 2>/dev/null || echo "${SCRIPT_DIR}/hadoop-handler")"
+
+        case "$action" in
+            enable)
+                mkdir -p "$plist_dir"
+                cat << EOF > "$plist_file"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>in.adityapidurkar.hadoop</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${hadoop_bin}</string>
+        <string>start</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+EOF
+                launchctl load "$plist_file" 2>/dev/null || true
+                echo -e "  ${GREEN}[✓] LaunchAgent enabled for macOS.${NC}"
+                send_notification "Hadoop Handler" "Hadoop LaunchAgent service enabled."
+                ;;
+            disable)
+                launchctl unload "$plist_file" 2>/dev/null || true
+                rm -f "$plist_file"
+                echo -e "  ${GREEN}[✓] LaunchAgent disabled for macOS.${NC}"
+                ;;
+            *)
+                echo -e "  ${YELLOW}Use 'hadoop-handler service enable' or 'disable' on macOS.${NC}"
+                ;;
+        esac
+    fi
+}
+
+# 7. Check for Updates and Perform In-Place Self-Update
+self_update() {
+    clear
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Checking & Updating Hadoop Handler${NC}"
+    echo -e "$DIVIDER\n"
+
+    local updated=false
+
+    # 1. Update ~/.hadoop-handler if present
+    if [ -d "$HOME/.hadoop-handler/.git" ]; then
+        echo -e "  [+] Checking global installation in ~/.hadoop-handler..."
+        (cd "$HOME/.hadoop-handler" && git pull origin main)
+        chmod +x "$HOME/.hadoop-handler/hadoop-handler" "$HOME/.hadoop-handler/setup.sh" 2>/dev/null || true
+        updated=true
+    fi
+
+    # 2. Update local repository if different
+    if [ -d "${SCRIPT_DIR}/.git" ] && [ "${SCRIPT_DIR}" != "$HOME/.hadoop-handler" ]; then
+        echo -e "  [+] Pulling latest changes in ${SCRIPT_DIR}..."
+        (cd "${SCRIPT_DIR}" && git pull origin main)
+        chmod +x "${SCRIPT_DIR}/hadoop-handler" 2>/dev/null || true
+        updated=true
+    fi
+
+    # 3. Update pip package if installed via pip
+    if command -v pip >/dev/null 2>&1 && pip list 2>/dev/null | grep -q "hadoop-handler"; then
+        echo -e "  [+] Upgrading pip package..."
+        pip install --upgrade hadoop-handler 2>/dev/null || true
+        updated=true
+    elif command -v python3 >/dev/null 2>&1 && python3 -m pip list 2>/dev/null | grep -q "hadoop-handler"; then
+        echo -e "  [+] Upgrading python3 pip package..."
+        python3 -m pip install --upgrade hadoop-handler 2>/dev/null || true
+        updated=true
+    fi
+
+    rm -f "$HOME/.hadoop-handler/.version_cache" 2>/dev/null || true
+
+    if [ "$updated" = "true" ]; then
+        echo -e "\n  ${GREEN}[✓] Hadoop Handler is up to date!${NC}"
+        send_notification "Hadoop Handler" "Hadoop Handler updated to the latest version."
+    else
+        echo -e "\n  ${YELLOW}[*] No git or pip package found to update.${NC}"
+    fi
+}
+
+# 8. Shell Autocompletion
+install_shell_completion() {
+    local target_shell="$1"
+    if [ -z "$target_shell" ]; then
+        target_shell="$(basename "$SHELL")"
+    fi
+
+    clear
+    echo -e "$DIVIDER"
+    echo -e "  ${BCYAN}ACTION: Installing Shell Autocompletion (${target_shell})${NC}"
+    echo -e "$DIVIDER\n"
+
+    case "$target_shell" in
+        bash)
+            local rc_file="$HOME/.bashrc"
+            if ! grep -q "_hadoop_handler_completions" "$rc_file" 2>/dev/null; then
+                cat << "EOF" >> "$rc_file"
+
+# Hadoop Handler shell completion
+_hadoop_handler_completions() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts="diagnose install verify status start stop restart delete service update completion --version --help --install-completion"
+
+    if [ "$prev" = "service" ]; then
+        COMPREPLY=( $(compgen -W "enable disable status start stop" -- "$cur") )
+        return 0
+    elif [ "$prev" = "completion" ]; then
+        COMPREPLY=( $(compgen -W "bash zsh fish powershell" -- "$cur") )
+        return 0
+    fi
+
+    COMPREPLY=( $(compgen -W "${opts}" -- "$cur") )
+    return 0
+}
+complete -F _hadoop_handler_completions hadoop-handler
+EOF
+                echo -e "  ${GREEN}[✓] Bash completions added to ${rc_file}!${NC}"
+                echo -e "      To activate immediately, run: ${YELLOW}source ${rc_file}${NC}"
+            else
+                echo -e "  ${YELLOW}[*] Completions already registered in ${rc_file}.${NC}"
+            fi
+            ;;
+        zsh)
+            local rc_file="$HOME/.zshrc"
+            if ! grep -q "_hadoop_handler_completions" "$rc_file" 2>/dev/null; then
+                cat << "EOF" >> "$rc_file"
+
+# Hadoop Handler shell completion
+autoload -Uz bashcompinit && bashcompinit
+_hadoop_handler_completions() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts="diagnose install verify status start stop restart delete service update completion --version --help --install-completion"
+
+    if [ "$prev" = "service" ]; then
+        COMPREPLY=( $(compgen -W "enable disable status start stop" -- "$cur") )
+        return 0
+    elif [ "$prev" = "completion" ]; then
+        COMPREPLY=( $(compgen -W "bash zsh fish powershell" -- "$cur") )
+        return 0
+    fi
+
+    COMPREPLY=( $(compgen -W "${opts}" -- "$cur") )
+    return 0
+}
+complete -F _hadoop_handler_completions hadoop-handler
+EOF
+                echo -e "  ${GREEN}[✓] Zsh completions added to ${rc_file}!${NC}"
+                echo -e "      To activate immediately, run: ${YELLOW}source ${rc_file}${NC}"
+            else
+                echo -e "  ${YELLOW}[*] Completions already registered in ${rc_file}.${NC}"
+            fi
+            ;;
+        fish)
+            local fish_dir="$HOME/.config/fish/completions"
+            mkdir -p "$fish_dir"
+            cat << "EOF" > "${fish_dir}/hadoop-handler.fish"
+complete -c hadoop-handler -f -a "diagnose install verify status start stop restart delete service update completion --version --help --install-completion"
+complete -c hadoop-handler -n "__fish_seen_subcommand_from service" -f -a "enable disable status start stop"
+complete -c hadoop-handler -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish powershell"
+EOF
+            echo -e "  ${GREEN}[✓] Fish completions saved to ${fish_dir}/hadoop-handler.fish!${NC}"
+            ;;
+        powershell)
+            cat << "EOF"
+Register-ArgumentCompleter -Native -CommandName hadoop-handler -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $commands = @('diagnose', 'install', 'verify', 'status', 'start', 'stop', 'restart', 'delete', 'service', 'update', 'completion', '--version', '--help')
+    $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
+EOF
+            echo -e "  ${GREEN}[✓] Add the snippet above to your PowerShell profile (\$PROFILE).${NC}"
+            ;;
+        *)
+            echo -e "  ${RED}[!] Unsupported shell: ${target_shell}. Supported: bash, zsh, fish, powershell.${NC}"
+            ;;
+    esac
+}
+
+# 0. Diagnose Environment
 diagnose_environment() {
     clear
     echo -e "$DIVIDER"
-    echo -e "  ${BCYAN}ACTION: Diagnose System Dependencies${NC}"
+    echo -e "  ${BCYAN}ACTION: Diagnosing System Dependencies${NC}"
     echo -e "$DIVIDER\n"
     
-    MISSING=()
-    REPAIR_CMDS=()
+    local missing_deps=()
+    local repair_cmds=()
     
-    # 1. Package Manager
-    PKG_MGR=""
-    SUDO_CMD="sudo"
+    echo -e "  ${GRAY}Scanning critical utilities...${NC}"
+    
+    # 1. Package Manager Detection
+    local pkg_manager=""
     if [ "$OS_NAME" = "Linux" ]; then
-        for pm in apt-get dnf yum pacman; do
-            if command -v $pm >/dev/null 2>&1; then
-                PKG_MGR=$pm
-                break
-            fi
-        done
-        if [ -z "$PKG_MGR" ]; then
-            echo -e "  ${RED}[!] No supported package manager found (apt, dnf, yum, pacman).${NC}"
-            return 1
-        fi
-        if ! command -v sudo >/dev/null 2>&1; then
-            echo -e "  ${YELLOW}[!] 'sudo' is not available. System repairs may fail if root access is required.${NC}"
-            SUDO_CMD=""
+        if command -v apt-get >/dev/null 2>&1; then
+            pkg_manager="apt"
+        elif command -v dnf >/dev/null 2>&1; then
+            pkg_manager="dnf"
+        elif command -v yum >/dev/null 2>&1; then
+            pkg_manager="yum"
+        elif command -v pacman >/dev/null 2>&1; then
+            pkg_manager="pacman"
+        elif command -v zypper >/dev/null 2>&1; then
+            pkg_manager="zypper"
         fi
     elif [ "$OS_NAME" = "Darwin" ]; then
         if command -v brew >/dev/null 2>&1; then
-            PKG_MGR="brew"
-        else
-            echo -e "  ${YELLOW}[!] Homebrew is missing.${NC}"
-            MISSING+=("homebrew")
-            REPAIR_CMDS+=("/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+            pkg_manager="brew"
         fi
     fi
-    echo -e "  ${GRAY}Package Manager:${NC} ${GREEN}${PKG_MGR:-Missing}${NC}"
 
-    # 2. Check Utilities
-    for util in tar wget curl ssh rsync; do
-        if ! command -v $util >/dev/null 2>&1; then
-            MISSING+=("$util")
-            if [ "$PKG_MGR" = "apt-get" ]; then
-                [ "$util" = "ssh" ] && pkg="openssh-client" || pkg="$util"
-                REPAIR_CMDS+=("$SUDO_CMD apt-get install -y $pkg")
-            elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
-                [ "$util" = "ssh" ] && pkg="openssh-clients" || pkg="$util"
-                REPAIR_CMDS+=("$SUDO_CMD $PKG_MGR install -y $pkg")
-            elif [ "$PKG_MGR" = "pacman" ]; then
-                [ "$util" = "ssh" ] && pkg="openssh" || pkg="$util"
-                REPAIR_CMDS+=("$SUDO_CMD pacman -S --noconfirm $pkg")
-            elif [ "$PKG_MGR" = "brew" ]; then
-                REPAIR_CMDS+=("brew install $util")
-            fi
+    # Helper function to check command and suggest repair
+    check_dependency() {
+        local cmd=$1
+        local pkg_apt=$2
+        local pkg_dnf=$3
+        local pkg_pacman=$4
+        local pkg_brew=$5
+
+        echo -ne "  - Checking for ${CYAN}${cmd}${NC}... "
+        if command -v "$cmd" >/dev/null 2>&1; then
+            echo -e "${GREEN}[OK]${NC}"
+        else
+            echo -e "${RED}[MISSING]${NC}"
+            missing_deps+=("$cmd")
+            
+            case "$pkg_manager" in
+                apt)
+                    [ -n "$pkg_apt" ] && repair_cmds+=("sudo apt-get install -y $pkg_apt")
+                    ;;
+                dnf|yum)
+                    [ -n "$pkg_dnf" ] && repair_cmds+=("sudo $pkg_manager install -y $pkg_dnf")
+                    ;;
+                pacman)
+                    [ -n "$pkg_pacman" ] && repair_cmds+=("sudo pacman -S --noconfirm $pkg_pacman")
+                    ;;
+                brew)
+                    [ -n "$pkg_brew" ] && repair_cmds+=("brew install $pkg_brew")
+                    ;;
+            esac
         fi
-    done
+    }
 
-    echo -e "\n  ${GRAY}Missing Dependencies:${NC}"
-    if [ ${#MISSING[@]} -eq 0 ]; then
-        echo -e "  ${GREEN}None! All core utilities are present.${NC}"
+    # Core utilities required by Hadoop scripts
+    check_dependency "curl" "curl" "curl" "curl" "curl"
+    check_dependency "tar" "tar" "tar" "tar" ""
+    check_dependency "ssh" "openssh-client openssh-server" "openssh-clients openssh-server" "openssh" ""
+    check_dependency "rsync" "rsync" "rsync" "rsync" "rsync"
+    
+    # Check Java
+    echo -ne "  - Checking for ${CYAN}Java (OpenJDK 21)${NC}... "
+    if command -v java >/dev/null 2>&1; then
+        local jv=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
+        if [[ "$jv" == 21* ]]; then
+            echo -e "${GREEN}[OK] (${jv})${NC}"
+        else
+            echo -e "${YELLOW}[VERSION MISMATCH] (Found ${jv}, required 21)${NC}"
+            missing_deps+=("java21")
+            case "$pkg_manager" in
+                apt) repair_cmds+=("sudo apt-get install -y openjdk-21-jdk") ;;
+                dnf|yum) repair_cmds+=("sudo $pkg_manager install -y java-21-openjdk-devel") ;;
+                pacman) repair_cmds+=("sudo pacman -S --noconfirm jre21-openjdk jdk21-openjdk") ;;
+                brew) repair_cmds+=("brew install openjdk@21") ;;
+            esac
+        fi
     else
-        for m in "${MISSING[@]}"; do
-            echo -e "  ${RED}- $m${NC}"
-        done
-        echo -e "\n  ${GRAY}Repair Actions Required:${NC}"
-        for cmd in "${REPAIR_CMDS[@]}"; do
-            echo -e "  > ${YELLOW}$cmd${NC}"
-        done
+        echo -e "${RED}[MISSING]${NC}"
+        missing_deps+=("java21")
+        case "$pkg_manager" in
+            apt) repair_cmds+=("sudo apt-get install -y openjdk-21-jdk") ;;
+            dnf|yum) repair_cmds+=("sudo $pkg_manager install -y java-21-openjdk-devel") ;;
+            pacman) repair_cmds+=("sudo pacman -S --noconfirm jre21-openjdk jdk21-openjdk") ;;
+            brew) repair_cmds+=("brew install openjdk@21") ;;
+        esac
+    fi
+
+    # SSH Server Status (Linux only)
+    if [ "$OS_NAME" = "Linux" ]; then
+        echo -ne "  - Checking for ${CYAN}SSH Daemon (sshd)${NC}... "
+        if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+            echo -e "${GREEN}[RUNNING]${NC}"
+        else
+            echo -e "${YELLOW}[NOT RUNNING]${NC}"
+            missing_deps+=("sshd_service")
+            repair_cmds+=("sudo systemctl enable --now ssh 2>/dev/null || sudo systemctl enable --now sshd")
+        fi
+    fi
+
+    echo -e "\n$DIVIDER"
+    if [ ${#missing_deps[@]} -eq 0 ]; then
+        echo -e "  ${GREEN}[✓] System scan complete! All dependencies are satisfied.${NC}"
+        rm -f /tmp/hadoop_repair_cmds.txt /tmp/hadoop_repair_missing.txt
+        return 0
+    else
+        echo -e "  ${YELLOW}[!] Diagnostics identified ${#missing_deps[@]} missing requirement(s).${NC}"
         
-        # Save to file to pass to apply
-        printf "%s\n" "${REPAIR_CMDS[@]}" > /tmp/hadoop_repair_cmds.txt
-        printf "%s\n" "${MISSING[@]}" > /tmp/hadoop_repair_missing.txt
+        # Save repair commands to temp files
+        printf "%s\n" "${repair_cmds[@]}" > /tmp/hadoop_repair_cmds.txt
+        printf "%s\n" "${missing_deps[@]}" > /tmp/hadoop_repair_missing.txt
+        return 1
     fi
 }
 
 apply_repairs() {
     local dry_run=$1
     if [ ! -f /tmp/hadoop_repair_cmds.txt ]; then
-        echo -e "  ${GREEN}[✓] Nothing to repair. System is already fully equipped.${NC}"
+        echo -e "  ${YELLOW}No pending repairs found. Please run Diagnostics first.${NC}"
         return 0
     fi
     
     if [ "$dry_run" = "true" ]; then
         echo -e "\n  ${BCYAN}--- DRY RUN MODE ---${NC}"
         echo -e "  The following commands would be executed:"
-        cat /tmp/hadoop_repair_cmds.txt | while read cmd; do
+        while read -r cmd; do
             echo -e "  > $cmd"
-        done
+        done < /tmp/hadoop_repair_cmds.txt
         return 0
     fi
 
     echo -e "\n  ${BCYAN}ACTION: Applying Repairs${NC}"
     echo -e "  $DIVIDER"
     
-    cat /tmp/hadoop_repair_cmds.txt | while read cmd; do
+    while read -r cmd; do
         echo -e "  ${GRAY}Executing: $cmd${NC}"
-        # Execute the command safely
         eval "$cmd"
         if [ $? -ne 0 ]; then
             echo -e "  ${RED}[!] Repair step failed: $cmd${NC}"
@@ -641,10 +1095,11 @@ apply_repairs() {
             rm -f /tmp/hadoop_repair_cmds.txt /tmp/hadoop_repair_missing.txt
             return 1
         fi
-    done
+    done < /tmp/hadoop_repair_cmds.txt
     
     echo -e "  ${GREEN}[✓] All repairs completed successfully!${NC}"
     rm -f /tmp/hadoop_repair_cmds.txt /tmp/hadoop_repair_missing.txt
+    send_notification "Hadoop Handler" "System dependency repairs finished."
 }
 
 diagnose_and_repair() {
@@ -662,7 +1117,8 @@ diagnose_and_repair() {
     fi
 }
 
-show_menu() {
+# Banner and Visual Status Badges
+show_banner_and_status() {
     echo -e "${CYAN}"
     cat << "EOF"
 █ █  ███  ██   ███  ███  ███    █ █  ███  ██ █  ██   █    ███  ███
@@ -673,19 +1129,149 @@ EOF
     echo -e "  ${GRAY}Developer:${NC} ${BCYAN}Aditya Pidurkar${NC} (${CYAN}github.com/itsadityapidurkar${NC})"
     echo -e "  ${GRAY}Scope:${NC}     Apache Hadoop 3.4.2 Single-Node Control Center"
     echo -e "$DIVIDER"
-    echo -e "  ${BCYAN}0.${NC} Diagnose/Repair System Dependencies"
-    echo -e "  ${BCYAN}1.${NC} Install Hadoop"
-    echo -e "  ${BCYAN}2.${NC} Verify Hadoop Installation"
-    echo -e "  ${BCYAN}3.${NC} Start Hadoop Services (HDFS & YARN)"
-    echo -e "  ${BCYAN}4.${NC} Stop Hadoop Services"
-    echo -e "  ${BCYAN}5.${NC} Delete Hadoop Completely"
-    echo -e "  ${BCYAN}6.${NC} Exit"
-    echo -e "$DIVIDER"
+    
+    # Check for update banner
+    check_version_banner
+
+    # Compute status badges
+    local h_stat=""
+    if command -v hadoop >/dev/null 2>&1; then
+        local h_ver=$(hadoop version 2>/dev/null | head -n 1 | awk '{print $2}')
+        [ -z "$h_ver" ] && h_ver="3.4.2"
+        h_stat="${BGREEN}[✓ Installed (${h_ver})]${NC}"
+    elif [ -n "$HADOOP_HOME" ] && [ -d "$HADOOP_HOME" ]; then
+        h_stat="${BGREEN}[✓ Installed]${NC}"
+    else
+        h_stat="${BRED}[✗ Not Installed]${NC}"
+    fi
+
+    local j_stat=""
+    if command -v java >/dev/null 2>&1; then
+        local j_ver=$(java -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/' | cut -d'.' -f1)
+        [ "$j_ver" = "1" ] && j_ver="8"
+        j_stat="${BGREEN}[✓ OpenJDK ${j_ver}]${NC}"
+    else
+        j_stat="${BRED}[✗ Missing]${NC}"
+    fi
+
+    local s_stat=""
+    local d_count=0
+    if command -v jps >/dev/null 2>&1; then
+        for d in NameNode DataNode SecondaryNameNode ResourceManager NodeManager; do
+            if jps 2>/dev/null | grep -wq "$d"; then
+                ((d_count++))
+            fi
+        done
+    fi
+
+    if [ $d_count -eq 5 ]; then
+        s_stat="${BGREEN}[✓ 5/5 Daemons Running]${NC}"
+    elif [ $d_count -gt 0 ]; then
+        s_stat="${YELLOW}[● ${d_count}/5 Daemons Running]${NC}"
+    else
+        s_stat="${GRAY}[● Stopped]${NC}"
+    fi
+
+    echo -e "  ${GRAY}Cluster Status:${NC}"
+    echo -e "    Hadoop:   ${h_stat}"
+    echo -e "    Java:     ${j_stat}"
+    echo -e "    Services: ${s_stat}"
 }
 
-# CLI Subcommands & Flags
+MENU_OPTIONS=(
+    "Diagnose/Repair System Dependencies"
+    "Install Hadoop"
+    "Verify Hadoop Installation"
+    "Start Hadoop Services (HDFS & YARN)"
+    "Stop Hadoop Services"
+    "Delete Hadoop Completely"
+    "System Service Integration (systemd)"
+    "Check for Updates (Self-Update)"
+    "Install Shell Autocompletion"
+    "Exit"
+)
+
+MENU_CHOICE=""
+
+# Arrow-Key Navigation Menu Selector
+select_menu_option() {
+    MENU_CHOICE=""
+    local selected=0
+    local key=""
+    local num_options=${#MENU_OPTIONS[@]}
+
+    # Fallback to plain prompt if stdin is not a TTY (for piping/scripting)
+    if [ ! -t 0 ]; then
+        clear
+        show_banner_and_status
+        echo -e "$DIVIDER"
+        for i in "${!MENU_OPTIONS[@]}"; do
+            echo -e "  [ $i ] ${MENU_OPTIONS[$i]}"
+        done
+        echo -e "$DIVIDER"
+        read -r choice || choice=9
+        MENU_CHOICE="${choice:-9}"
+        return 0
+    fi
+
+    # Hide cursor
+    tput civis 2>/dev/null || printf "\033[?25l"
+    trap 'tput cnorm 2>/dev/null || printf "\033[?25h"' RETURN EXIT INT TERM
+
+    while true; do
+        clear
+        show_banner_and_status
+        echo -e "$DIVIDER"
+        for i in "${!MENU_OPTIONS[@]}"; do
+            if [ "$i" -eq "$selected" ]; then
+                echo -e "  ${BCYAN}▶${NC} ${BGREEN}[ $i ] ${MENU_OPTIONS[$i]}${NC}"
+            else
+                echo -e "    ${GRAY}[ $i ]${NC} ${MENU_OPTIONS[$i]}"
+            fi
+        done
+        echo -e "$DIVIDER"
+        echo -e "  ${GRAY}Use [↑/↓] (or j/k) and [Enter] to select, or press [0-$((num_options - 1))] directly${NC}"
+
+        IFS= read -rsn1 key
+        if [ "$key" = $'\x1b' ]; then
+            read -rsn2 -t 0.1 rest
+            key+="$rest"
+            case "$key" in
+                $'\x1b[A'|$'\x1bOA') # Up arrow
+                    ((selected--))
+                    [ $selected -lt 0 ] && selected=$((num_options - 1))
+                    ;;
+                $'\x1b[B'|$'\x1bOB') # Down arrow
+                    ((selected++))
+                    [ $selected -ge $num_options ] && selected=0
+                    ;;
+            esac
+        elif [ "$key" = "k" ] || [ "$key" = "K" ]; then
+            ((selected--))
+            [ $selected -lt 0 ] && selected=$((num_options - 1))
+        elif [ "$key" = "j" ] || [ "$key" = "J" ]; then
+            ((selected++))
+            [ $selected -ge $num_options ] && selected=0
+        elif [ -z "$key" ] || [ "$key" = $'\n' ]; then
+            break
+        elif [[ "$key" =~ ^[0-9]$ ]] && [ "$key" -lt "$num_options" ]; then
+            selected="$key"
+            break
+        elif [ "$key" = "q" ] || [ "$key" = "Q" ]; then
+            selected=$((num_options - 1))
+            break
+        fi
+    done
+
+    # Restore cursor
+    tput cnorm 2>/dev/null || printf "\033[?25h"
+    MENU_CHOICE="$selected"
+}
+
+# Load environment on launch
 load_env
 
+# CLI Subcommands & Flags
 if [ -n "$1" ]; then
     case "$1" in
         0|diagnose|repair)
@@ -708,31 +1294,60 @@ if [ -n "$1" ]; then
             stop_services
             exit $?
             ;;
+        restart)
+            stop_services
+            sleep 2
+            start_services
+            exit $?
+            ;;
         5|delete)
             delete_hadoop
+            exit $?
+            ;;
+        6|service)
+            shift
+            manage_system_service "$@"
+            exit $?
+            ;;
+        7|update|self-update)
+            self_update
+            exit $?
+            ;;
+        8|completion)
+            shift
+            install_shell_completion "$@"
+            exit $?
+            ;;
+        --install-completion)
+            install_shell_completion
             exit $?
             ;;
         menu)
             # Fall through to interactive loop
             ;;
         -v|--version)
-            echo "hadoop-handler 1.0.0"
+            echo "hadoop-handler ${CURRENT_VERSION}"
             exit 0
             ;;
         -h|--help)
-            echo "Hadoop Handler — Single-Node Cluster Control Center"
-            echo "Usage: hadoop-handler [command]"
+            echo "Hadoop Handler v${CURRENT_VERSION} — Single-Node Cluster Control Center"
+            echo "Usage: hadoop-handler [command] [options]"
             echo ""
             echo "Commands:"
-            echo "  (no args)   Launch interactive menu"
-            echo "  diagnose    Diagnose/Repair system dependencies"
-            echo "  install     Install and configure Apache Hadoop 3.4.2"
-            echo "  verify      Verify Hadoop and Java installation and running daemons"
-            echo "  start       Start Hadoop services (HDFS & YARN)"
-            echo "  stop        Stop Hadoop services"
-            echo "  delete      Delete Hadoop installation completely"
-            echo "  -v, --version  Show version"
-            echo "  -h, --help     Show this help message"
+            echo "  (no args)               Launch interactive TUI control panel"
+            echo "  diagnose                Diagnose/Repair system dependencies"
+            echo "  install                 Install and configure Apache Hadoop 3.4.2"
+            echo "  verify, status          Check Hadoop and Java status and running daemons"
+            echo "  start                   Start Hadoop services (HDFS & YARN)"
+            echo "  stop                    Stop Hadoop services"
+            echo "  restart                 Restart all cluster daemons"
+            echo "  delete                  Delete Hadoop cluster installation completely"
+            echo "  service <action>        Manage system service (enable|disable|status|start|stop)"
+            echo "  update                  Check and perform in-place self-update"
+            echo "  completion <shell>      Generate autocompletion script (bash|zsh|fish|powershell)"
+            echo "  --install-completion    Automatically install autocompletion for current shell"
+            echo "  -v, --version           Show version"
+            echo "  -h, --help              Show this help message"
             exit 0
             ;;
         *)
@@ -744,13 +1359,10 @@ if [ -n "$1" ]; then
 fi
 
 # Interactive Menu Loop
-
 while true; do
-    clear
-    show_menu
-    read -p "  Select an option [0-6]: " choice
+    select_menu_option
     
-    case $choice in
+    case $MENU_CHOICE in
         0)
             diagnose_and_repair
             pause_screen
@@ -776,13 +1388,25 @@ while true; do
             pause_screen
             ;;
         6)
+            manage_system_service
+            pause_screen
+            ;;
+        7)
+            self_update
+            pause_screen
+            ;;
+        8)
+            install_shell_completion
+            pause_screen
+            ;;
+        9)
             clear
             echo -e "\n  Exiting Hadoop Handler. Goodbye!"
             exit 0
             ;;
         *)
-            echo -e "  ${RED}[!] Invalid choice. Please select [0-6].${NC}"
-            sleep 1.5
+            echo -e "  ${RED}[!] Invalid choice.${NC}"
+            sleep 1.2
             ;;
     esac
 done
